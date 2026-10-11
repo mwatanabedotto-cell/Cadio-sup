@@ -69,6 +69,7 @@ function createApp(config = {}) {
   const db = openDb(dataDir);
   const secureCookies = Boolean(config.secureCookies);
   const doctorCode = config.doctorCode || null;
+  const readBP = config.reader || null; // lector automático de fotos (opcional)
 
   const app = express();
   app.disable('x-powered-by');
@@ -99,6 +100,26 @@ function createApp(config = {}) {
     });
   const uploadPhoto = makeUpload(IMAGE_TYPES).single('photo');
   const uploadLab = makeUpload(LAB_TYPES).single('file');
+  const uploadToMemory = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_FILE_MB * 1024 * 1024, files: 1 },
+    fileFilter: (_req, file, cb) => {
+      if (IMAGE_TYPES[file.mimetype]) cb(null, true);
+      else cb(new HttpError(400, 'Tipo de archivo no permitido.'));
+    },
+  }).single('photo');
+
+  // Límite de lecturas automáticas por usuario para controlar el costo de la API.
+  const READS_PER_HOUR = config.readsPerHour ?? 30;
+  const readLog = new Map();
+  const allowRead = (userId) => {
+    const hourAgo = Date.now() - 3600e3;
+    const recent = (readLog.get(userId) || []).filter((t) => t > hourAgo);
+    if (recent.length >= READS_PER_HOUR) return false;
+    recent.push(Date.now());
+    readLog.set(userId, recent);
+    return true;
+  };
 
   const removeFile = (name) => {
     if (name) fs.rmSync(path.join(uploadDir, path.basename(name)), { force: true });
@@ -130,7 +151,7 @@ function createApp(config = {}) {
   app.get('/api/doctors', h(() =>
     db.prepare("SELECT id, name FROM users WHERE role = 'doctor' ORDER BY name").all()));
 
-  app.get('/api/config', h(() => ({ doctorSignup: Boolean(doctorCode) })));
+  app.get('/api/config', h(() => ({ doctorSignup: Boolean(doctorCode), autoRead: Boolean(readBP) })));
 
   app.post('/api/auth/register', h((req, res) => {
     const b = req.body || {};
@@ -197,6 +218,36 @@ function createApp(config = {}) {
   app.get('/api/bp', patient, h((req) =>
     db.prepare('SELECT * FROM bp_readings WHERE patient_id = ? ORDER BY taken_at DESC LIMIT 500').all(req.user.id)));
 
+  // Lee los números de la foto sin guardarla, para que el paciente los confirme.
+  app.post('/api/bp/read', patient, uploadToMemory, async (req, res, next) => {
+    try {
+      if (!readBP) throw new HttpError(404, 'La lectura automática no está activada en este servidor.');
+      if (!req.file) throw new HttpError(400, 'Debes adjuntar la foto del tensiómetro.');
+      if (!allowRead(req.user.id)) throw new HttpError(429, 'Demasiadas lecturas automáticas. Escribe los valores a mano.');
+      res.json(await readBP(req.file.buffer, req.file.mimetype));
+    } catch (err) {
+      if (!(err instanceof HttpError)) {
+        console.error('Error en lectura automática:', err.message);
+        err = new HttpError(502, 'No se pudo leer la foto automáticamente. Escribe los valores a mano.');
+      }
+      next(err);
+    }
+  });
+
+  /** Si la toma llegó sin valores, intenta leerlos de la foto en segundo plano. */
+  const readInBackground = (readingId, photo, mime) => {
+    if (!readBP) return;
+    fs.promises.readFile(path.join(uploadDir, photo))
+      .then((buf) => readBP(buf, mime))
+      .then((r) => {
+        if (!r.readable) return;
+        db.prepare(`
+          UPDATE bp_readings SET systolic = ?, diastolic = ?, pulse = ?, values_source = 'ia'
+          WHERE id = ? AND systolic IS NULL AND diastolic IS NULL`).run(r.systolic, r.diastolic, r.pulse, readingId);
+      })
+      .catch((err) => console.error('Error en lectura automática:', err.message));
+  };
+
   app.post('/api/bp', patient, uploadPhoto, h((req, res) => {
     if (!req.file) throw new HttpError(400, 'Debes adjuntar la foto del tensiómetro.');
     const b = req.body || {};
@@ -205,11 +256,14 @@ function createApp(config = {}) {
     const pulse = int(b.pulse, 20, 250, 'El pulso');
     const arm = ['izquierdo', 'derecho'].includes(b.arm) ? b.arm : null;
     const takenAt = isoDate(b.taken_at, 'La fecha de la toma') || new Date().toISOString();
+    const hasValues = systolic !== null || diastolic !== null;
+    const source = hasValues ? (b.values_source === 'ia' ? 'ia' : 'paciente') : null;
 
     const { lastInsertRowid } = db.prepare(`
-      INSERT INTO bp_readings (patient_id, photo, systolic, diastolic, pulse, arm, taken_at, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      req.user.id, req.file.filename, systolic, diastolic, pulse, arm, takenAt, text(b.notes));
+      INSERT INTO bp_readings (patient_id, photo, systolic, diastolic, pulse, arm, values_source, taken_at, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      req.user.id, req.file.filename, systolic, diastolic, pulse, arm, source, takenAt, text(b.notes));
+    if (!hasValues) readInBackground(Number(lastInsertRowid), req.file.filename, req.file.mimetype);
     res.status(201);
     return db.prepare('SELECT * FROM bp_readings WHERE id = ?').get(lastInsertRowid);
   }));
@@ -330,12 +384,15 @@ function createApp(config = {}) {
     if (!row) throw new HttpError(404, 'Toma no encontrada.');
     const b = req.body || {};
     const has = (k) => Object.prototype.hasOwnProperty.call(b, k);
+    const systolic = has('systolic') ? int(b.systolic, 50, 300, 'La sistólica') : row.systolic;
+    const diastolic = has('diastolic') ? int(b.diastolic, 30, 200, 'La diastólica') : row.diastolic;
+    const pulse = has('pulse') ? int(b.pulse, 20, 250, 'El pulso') : row.pulse;
+    const changed = systolic !== row.systolic || diastolic !== row.diastolic || pulse !== row.pulse;
     db.prepare(`
-      UPDATE bp_readings SET systolic = ?, diastolic = ?, pulse = ?, doctor_comment = ?, reviewed_at = ?
+      UPDATE bp_readings SET systolic = ?, diastolic = ?, pulse = ?, values_source = ?, doctor_comment = ?, reviewed_at = ?
       WHERE id = ?`).run(
-      has('systolic') ? int(b.systolic, 50, 300, 'La sistólica') : row.systolic,
-      has('diastolic') ? int(b.diastolic, 30, 200, 'La diastólica') : row.diastolic,
-      has('pulse') ? int(b.pulse, 20, 250, 'El pulso') : row.pulse,
+      systolic, diastolic, pulse,
+      changed ? 'medico' : row.values_source,
       has('doctor_comment') ? text(b.doctor_comment, 1000) : row.doctor_comment,
       new Date().toISOString(),
       row.id);

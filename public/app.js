@@ -9,7 +9,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 let view = $('#view');
 const tabs = $('#tabs');
 
-const state = { user: null, doctor: null };
+const state = { user: null, doctor: null, config: {} };
 
 // ---------- utilidades ----------
 
@@ -52,6 +52,12 @@ function classifyBP(s, d) {
 function bpBadge(r) {
   const c = classifyBP(r.systolic, r.diastolic);
   return c.cls ? `<span class="badge ${c.cls}">${c.label}</span>` : '';
+}
+
+function sourceBadge(r) {
+  if (r.values_source === 'ia') return '<span class="badge ai" title="Valores leídos automáticamente de la foto">🤖 Leído por IA</span>';
+  if (r.values_source === 'medico') return '<span class="badge info">Valores corregidos por el médico</span>';
+  return '';
 }
 
 function bpValue(r) {
@@ -329,7 +335,7 @@ function readingCard(r, { canDelete = false } = {}) {
       <div class="grow">
         <div>${bpValue(r)}</div>
         <div class="muted">${fmt.dateTime(r.taken_at)}${r.arm ? ` · brazo ${esc(r.arm)}` : ''}</div>
-        <div style="margin-top:4px">${bpBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada por el médico</span>' : '<span class="badge pend">Enviada</span>'}</div>
+        <div style="margin-top:4px">${bpBadge(r)} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada por el médico</span>' : '<span class="badge pend">Enviada</span>'}</div>
         ${r.notes ? `<p class="muted">📝 ${esc(r.notes)}</p>` : ''}
         ${r.doctor_comment ? `<div class="comment"><b>Médico:</b> ${esc(r.doctor_comment)}</div>` : ''}
       </div>
@@ -375,7 +381,10 @@ async function viewNewBP() {
         <button type="button" class="btn block big" id="cam">📷 Tomar foto</button>
       </div>
       <div class="card stack">
-        <p class="muted">2. Si quieres, escribe los valores (tu médico también los verá en la foto).</p>
+        <p class="muted" id="step2">${state.config.autoRead
+          ? '2. Los números se leen solos de la foto. Verifica que coincidan con la pantalla del tensiómetro y corrígelos si hace falta.'
+          : '2. Si quieres, escribe los valores (tu médico también los verá en la foto).'}</p>
+        <div id="ai" class="ai-status" hidden></div>
         <div class="grid3">
           <div><label for="s">Sistólica</label><input id="s" name="systolic" type="number" inputmode="numeric" min="50" max="300" placeholder="120"></div>
           <div><label for="d">Diastólica</label><input id="d" name="diastolic" type="number" inputmode="numeric" min="30" max="200" placeholder="80"></div>
@@ -391,10 +400,41 @@ async function viewNewBP() {
       <a class="btn block secondary" href="#/presion">Cancelar</a>
     </form>`;
 
+  let aiValues = null; // valores tal como los leyó la IA
+  let readSeq = 0;
+  const fields = { systolic: $('#s'), diastolic: $('#d'), pulse: $('#p') };
+  const aiBox = $('#ai');
+  const showAi = (cls, html) => { aiBox.className = `ai-status ${cls}`; aiBox.innerHTML = html; aiBox.hidden = false; };
+
+  /** Envía la foto al servidor para leer los números y rellena el formulario. */
+  const autoRead = async (blob) => {
+    const seq = ++readSeq;
+    aiValues = null;
+    showAi('busy', '<span class="spinner"></span> Leyendo los números de la foto…');
+    const fd = new FormData();
+    fd.set('photo', blob, 'toma.jpg');
+    try {
+      const r = await api('POST', '/api/bp/read', fd);
+      if (seq !== readSeq) return; // llegó otra foto mientras tanto
+      if (!r.readable) {
+        showAi('warn', `⚠️ ${esc(r.note || 'No se pudieron leer los números.')} Puedes escribirlos a mano.`);
+        return;
+      }
+      for (const k of ['systolic', 'diastolic', 'pulse']) fields[k].value = r[k] ?? '';
+      aiValues = { systolic: r.systolic, diastolic: r.diastolic, pulse: r.pulse };
+      showAi(r.confidence === 'baja' ? 'warn' : 'ok',
+        `🤖 Leído: <b>${r.systolic}/${r.diastolic}</b>${r.pulse ? ` · pulso ${r.pulse}` : ''}. ` +
+        (r.confidence === 'baja' ? '<b>No estoy seguro de algún número: revísalo con atención.</b>' : 'Comprueba que coincida con la pantalla.'));
+    } catch (err) {
+      if (seq === readSeq) showAi('warn', `⚠️ ${esc(err.message)}`);
+    }
+  };
+
   const setPhoto = (blob) => {
     photo = blob;
     $('#ph').innerHTML = blob ? `<img class="preview" src="${URL.createObjectURL(blob)}" alt="Vista previa">` : '';
     $('#cam').textContent = blob ? '🔄 Repetir foto' : '📷 Tomar foto';
+    if (blob && state.config.autoRead) autoRead(blob);
   };
   $('#cam').addEventListener('click', async () => {
     const blob = await takePhoto();
@@ -407,6 +447,9 @@ async function viewNewBP() {
     if ((s && !d) || (!s && d)) throw new Error('Escribe sistólica y diastólica, o deja ambas vacías.');
     fd.set('taken_at', new Date(fd.get('taken_at')).toISOString());
     fd.set('photo', photo, 'toma.jpg');
+    const asNum = (v) => (v ? Number(v) : null);
+    const untouched = aiValues && ['systolic', 'diastolic', 'pulse'].every((k) => asNum(fd.get(k)) === aiValues[k]);
+    fd.set('values_source', untouched ? 'ia' : 'paciente');
     await api('POST', '/api/bp', fd);
     toast('✅ Toma enviada a tu médico');
     go('#/presion');
@@ -629,7 +672,7 @@ async function viewDoctorPatient(id) {
           <div class="grow">
             <div>${bpValue(r)}</div>
             <div class="muted">${fmt.dateTime(r.taken_at)}${r.arm ? ` · brazo ${esc(r.arm)}` : ''}</div>
-            <div style="margin-top:4px">${bpBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada</span>' : '<span class="badge pend">Nueva</span>'}</div>
+            <div style="margin-top:4px">${bpBadge(r)} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada</span>' : '<span class="badge pend">Nueva</span>'}</div>
             ${r.notes ? `<p class="muted">📝 ${esc(r.notes)}</p>` : ''}
           </div>
         </div>
@@ -886,6 +929,7 @@ async function logout() {
 }
 
 async function boot() {
+  state.config = await api('GET', '/api/config').catch(() => ({}));
   try {
     const me = await api('GET', '/api/me');
     state.user = me.user;

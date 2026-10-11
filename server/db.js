@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS bp_readings (
   diastolic      INTEGER,
   pulse          INTEGER,
   arm            TEXT,
+  values_source  TEXT,            -- 'paciente' | 'ia' | 'medico'
   taken_at       TEXT NOT NULL,
   notes          TEXT,
   doctor_comment TEXT,
@@ -84,7 +85,14 @@ function openDb(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'cadio.sqlite'));
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Cambios de esquema para bases de datos creadas con versiones anteriores. */
+function migrate(db) {
+  const cols = db.prepare('PRAGMA table_info(bp_readings)').all().map((c) => c.name);
+  if (!cols.includes('values_source')) db.exec('ALTER TABLE bp_readings ADD COLUMN values_source TEXT');
 }
 
 /** Ejecuta fn dentro de una transacción. */

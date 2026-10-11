@@ -13,6 +13,7 @@
     "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
     "express": "^5.1.0",
     "multer": "^2.0.2"
   }
