@@ -108,7 +108,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--primary); o
 .link { background: none; border: 0; color: var(--primary); font: inherit; cursor: pointer; padding: 4px; }
 
 .segmented { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 3px; margin-bottom: 14px; }
-.segmented button { flex: 1; border: 0; background: none; font: inherit; padding: 9px; border-radius: 9px; color: var(--muted); cursor: pointer; }
+.segmented button { flex: 1; min-width: 0; border: 0; background: none; font: inherit; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 9px 4px; border-radius: 9px; color: var(--muted); cursor: pointer; }
 .segmented button.active { background: var(--card); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
 
 .thumb {
@@ -189,3 +189,51 @@ dialog img.full { width: 100%; max-height: 75vh; object-fit: contain; background
   .grid3 { grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
   .thumb { width: 64px; height: 64px; }
 }
+
+/* ---------- avisos ---------- */
+.top-actions { display: flex; align-items: center; gap: 6px; }
+.bell { position: relative; text-decoration: none; font-size: 1.25rem; padding: 4px 6px; }
+.bell-count { position: absolute; top: -2px; right: -4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--primary); color: #fff; font-size: .7rem; font-weight: 700; display: grid; place-items: center; }
+.notif { text-decoration: none; color: inherit; align-items: flex-start; }
+.notif.unread { border-color: var(--info); }
+.notif.urgent.unread { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, var(--card)); }
+.notif-icon { font-size: 1.4rem; line-height: 1.2; }
+.push-prompt { border-color: var(--info); align-items: center; }
+
+/* ---------- meta ---------- */
+.target-line { margin: -6px 0 12px; }
+.target-row { align-items: center; }
+.target-row + form .row input { width: 90px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip { font: inherit; font-size: .85rem; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; }
+
+/* ---------- protocolo AMPA ---------- */
+.ampa { border-color: color-mix(in srgb, var(--info) 45%, var(--line)); }
+.ampa-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(42px, 1fr)); gap: 6px; margin-top: 8px; }
+.ampa-day { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 2px; border-radius: 10px; background: var(--bg); font-size: .75rem; }
+.ampa-day b { font-size: 1rem; }
+.ampa-day.today { outline: 2px solid var(--info); }
+.ampa-day.practice { opacity: .7; }
+.dots { display: flex; gap: 3px; }
+.dots i { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.dots i.on { background: var(--ok); border-color: var(--ok); }
+.ampa-result { margin-top: 10px; padding: 10px 12px; border-radius: 10px; display: flex; flex-direction: column; font-size: .85rem; }
+.ampa-result b { font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+.ampa-result.ok { background: #d9f2e5; color: #11633d; }
+.ampa-result.high { background: #ffd2cc; color: #8f1d12; }
+
+/* ---------- medicación ---------- */
+.dose { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.dose:last-child { border-bottom: 0; }
+.dose-time { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 48px; }
+.dose-time.late { color: var(--danger); }
+.dose-actions { display: flex; gap: 6px; }
+.dose-done { display: flex; flex-direction: column; align-items: flex-end; font-size: .85rem; font-weight: 600; }
+.dose.taken .dose-done { color: var(--ok); }
+.dose.skipped .dose-done { color: var(--muted); }
+.dose-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.dose-strip > div { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: .7rem; }
+.dose-strip i { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.dose-strip i.taken { background: var(--ok); border-color: var(--ok); }
+.dose-strip i.skipped { background: var(--danger); border-color: var(--danger); border-radius: 2px; }

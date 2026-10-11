@@ -48,6 +48,9 @@ ${demoCss}
 </div>
 ${body.trim()}
 <script>
+${read('public/clinical.js')}
+</script>
+<script>
 ${read('demo/mock-api.js')}
 </script>
 <script>

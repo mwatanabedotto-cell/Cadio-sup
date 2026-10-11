@@ -53,11 +53,13 @@
   const iso = (ms) => new Date(ms).toISOString();
   const sqlDate = (ms) => iso(ms).slice(0, 19).replace('T', ' ');
 
+  const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const today = Clinical.localParts(new Date(), TZ).date;
   const users = [
     { id: 1, name: 'Dra. Carmen Ríos', email: 'medico@demo.com', phone: '+55 11 4000-1234', role: 'doctor', doctor_id: null, birth_date: null },
-    { id: 2, name: 'Ana López', email: 'paciente@demo.com', phone: '+55 11 98888-1111', role: 'patient', doctor_id: 1, birth_date: '1961-04-12' },
-    { id: 3, name: 'Jorge Méndez', email: 'jorge@demo.com', phone: '+55 11 97777-2222', role: 'patient', doctor_id: 1, birth_date: '1954-09-30' },
-    { id: 4, name: 'Lucía Torres', email: 'lucia@demo.com', phone: null, role: 'patient', doctor_id: 1, birth_date: '1978-01-05' },
+    { id: 2, name: 'Ana López', email: 'paciente@demo.com', phone: '+55 11 98888-1111', role: 'patient', doctor_id: 1, birth_date: '1961-04-12', bp_target_sys: 130, bp_target_dia: 80, timezone: TZ },
+    { id: 3, name: 'Jorge Méndez', email: 'jorge@demo.com', phone: '+55 11 97777-2222', role: 'patient', doctor_id: 1, birth_date: '1954-09-30', bp_target_sys: 140, bp_target_dia: 90, timezone: TZ },
+    { id: 4, name: 'Lucía Torres', email: 'lucia@demo.com', phone: null, role: 'patient', doctor_id: 1, birth_date: '1978-01-05', timezone: TZ },
   ];
 
   const bp = [];
@@ -78,7 +80,7 @@
   // Ana: tendencia a la baja tras ajuste de medicación.
   const anaSeries = [[152, 96, 80], [148, 94, 78], [146, 93, 79], [141, 90, 76], [139, 88, 75], [138, 89, 74],
     [134, 86, 73], [133, 85, 72], [131, 84, 72], [129, 83, 70], [128, 82, 71], [126, 81, 69]];
-  anaSeries.forEach(([s, d, p], i) => {
+  anaSeries.slice(0, 8).forEach(([s, d, p], i) => {
     const daysAgo = 11 - i;
     const r = addBp(2, daysAgo, i % 2 ? 20 : 8, s, d, p);
     if (daysAgo >= 4) r.reviewed_at = iso(now - (daysAgo - 1) * 864e5);
@@ -86,6 +88,24 @@
     if (i === 3) { r.doctor_comment = 'Vamos bien. Sigue con losartán 50 mg cada 12 h.'; r.values_source = 'paciente'; }
     if (i === 7) r.doctor_comment = 'Excelente evolución, mantén la caminata diaria.';
   });
+  // Ana: protocolo AMPA en curso (empezó hace 3 días): 2 tomas a las 08:00 y 2 a las 20:00.
+  const protocols = [{ id: 1, patient_id: 2, doctor_id: 1, start_date: Clinical.addDays(today, -3), days: 7,
+    morning_time: '08:00', evening_time: '20:00', tz: TZ, status: 'active', completed_notified: 0 }];
+  let protocolSeq = 1;
+  const ampaValues = [[136, 87], [134, 85], [131, 83], [133, 84], [130, 82], [129, 81], [132, 83], [128, 80],
+    [127, 81], [129, 82], [126, 79], [128, 80], [125, 79], [127, 80]];
+  let av = 0;
+  for (let dayAgo = 3; dayAgo >= 0; dayAgo--) {
+    for (const [h, m] of [[8, 2], [8, 4], [20, 3], [20, 5]]) {
+      const t = new Date(now - dayAgo * 864e5); t.setHours(h, m, 0, 0);
+      if (t.getTime() > now) continue;
+      const [s, d] = ampaValues[av++ % ampaValues.length];
+      const r = addBp(2, 0, 0, s, d, 68 + (av % 5));
+      r.taken_at = iso(t.getTime());
+      if (dayAgo >= 2) r.reviewed_at = iso(t.getTime() + 864e5);
+    }
+  }
+
   // Tomas medidas en el consultorio (sin foto).
   const office = (patient_id, daysAgo, sys, dia, pul, comment) => {
     const d = new Date(now - daysAgo * 864e5); d.setHours(10, 30, 0, 0);
@@ -136,6 +156,58 @@
   ];
   let apptSeq = appointments.length;
 
+  // Medicación y registro de dosis.
+  const meds = [
+    { id: 1, patient_id: 2, name: 'Losartán', dose: '50 mg', times: ['08:00', '20:00'], instructions: 'Con el desayuno y la cena', start_date: Clinical.addDays(today, -20), stopped_at: null, created_at: sqlDate(now - 20 * 864e5) },
+    { id: 2, patient_id: 2, name: 'Atorvastatina', dose: '20 mg', times: ['22:00'], instructions: 'En la noche', start_date: Clinical.addDays(today, -8), stopped_at: null, created_at: sqlDate(now - 8 * 864e5) },
+    { id: 3, patient_id: 3, name: 'Amlodipino', dose: '10 mg', times: ['08:00'], instructions: null, start_date: Clinical.addDays(today, -20), stopped_at: null, created_at: sqlDate(now - 20 * 864e5) },
+    { id: 4, patient_id: 3, name: 'Enalapril', dose: '20 mg', times: ['08:00', '20:00'], instructions: null, start_date: Clinical.addDays(today, -20), stopped_at: null, created_at: sqlDate(now - 20 * 864e5) },
+  ];
+  let medSeq = meds.length;
+  const medLogs = [];
+  const nowLocal = Clinical.localParts(new Date(), TZ);
+  for (const m of meds) {
+    // Ana toma casi todo; Jorge olvida con frecuencia (explica sus picos).
+    const pattern = m.patient_id === 2 ? [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 2, 1] : [1, 0, 0, 1, 2, 0, 1, 0, 1, 0, 0, 1, 0, 2];
+    Clinical.expectedDoses(m, Clinical.addDays(today, -13), today, nowLocal).forEach((x, i) => {
+      if (x.date === today && m.patient_id === 2) return; // hoy queda pendiente para probar la pantalla
+      const v = pattern[i % pattern.length];
+      if (v) medLogs.push({ medication_id: m.id, patient_id: m.patient_id, date: x.date, time: x.time, status: v === 1 ? 'taken' : 'skipped' });
+    });
+  }
+
+  // Avisos.
+  const notifications = [];
+  let notifSeq = 0;
+  const notify = (user_id, kind, title, body, url, minsAgo = 0, read = false) => notifications.push({
+    id: ++notifSeq, user_id, kind, title, body, url, read_at: read ? nowIso() : null, created_at: sqlDate(now - minsAgo * 60e3) });
+  function nowIso() { return new Date().toISOString(); }
+  notify(1, 'appointment', 'Nueva solicitud de cita: Jorge Méndez', 'Presión muy alta esta semana', '#/agenda', 50);
+  notify(1, 'bp_alert', 'Presión muy alta: Jorge Méndez', '184/112 mmHg · pulso 94 · "Olvidé la pastilla de anoche."', '#/paciente/3', 35);
+  notify(2, 'protocol', 'Tu médico te indicó un protocolo de medición', '7 días: 2 tomas a las 08:00 y 2 a las 20:00.', '#/presion', 4 * 1440, true);
+  notify(2, 'target', 'Tu médico fijó tu meta de presión', 'Menos de 130/80 mmHg.', '#/presion', 4 * 1440, true);
+  notify(2, 'comment', 'Tu médico revisó: Perfil lipídico', 'LDL elevado. Iniciamos atorvastatina 20 mg en la noche; repetir en 3 meses.', '#/labs', 8 * 1440, true);
+
+  const protocolFor = (patientId) => {
+    const p = protocols.filter((x) => x.patient_id === patientId && x.status === 'active').at(-1);
+    return p ? { ...p, summary: Clinical.protocolSummary(p, bp.filter((r) => r.patient_id === patientId)) } : null;
+  };
+  const medsFor = (patientId) => {
+    const tzNow = Clinical.localParts(new Date(), TZ);
+    const list = meds.filter((m) => m.patient_id === patientId)
+      .map((m) => ({ ...m, created_local: Clinical.createdLocal(m, TZ) }))
+      .map((m) => ({ ...m, adherence: Clinical.adherence(m, medLogs, TZ) }));
+    return { meds: list, logs: medLogs.filter((l) => l.patient_id === patientId), today: tzNow };
+  };
+
+  // En la demo no se generan PDF: se avisa al tocar el enlace.
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href*="report.pdf"]');
+    if (!a) return;
+    e.preventDefault();
+    toast('En la demo no se genera el PDF. En la app real se abre el informe con promedios, gráfico, AMPA, remedios, tomas y laboratorios.'); // eslint-disable-line no-undef
+  }, true);
+
   let me = users[1]; // la demo arranca como paciente
 
   // ---------- consultas ----------
@@ -148,8 +220,6 @@
     const p = user(a.patient_id), d = user(a.doctor_id);
     return { ...a, starts_at: s.starts_at, minutes: s.minutes, patient_name: p.name, patient_phone: p.phone, doctor_name: d.name };
   };
-  const nowIso = () => new Date().toISOString();
-
   class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
   const need = (role) => {
     if (!me) throw new HttpError(401, 'Debes iniciar sesión.');
@@ -166,7 +236,25 @@
   };
 
   const routes = [
-    ['GET', /^\/api\/config$/, () => ({ doctorSignup: true, autoRead: true })],
+    ['GET', /^\/api\/config$/, () => ({ doctorSignup: true, autoRead: true, push: false })],
+    ['POST', /^\/api\/me\/timezone$/, () => ({ ok: true })],
+    ['GET', /^\/api\/notifications$/, () => {
+      need();
+      const items = notifications.filter((n) => n.user_id === me.id).sort((a, b) => b.id - a.id);
+      return { items, unread: items.filter((n) => !n.read_at).length };
+    }],
+    ['POST', /^\/api\/notifications\/read$/, () => {
+      need(); notifications.filter((n) => n.user_id === me.id && !n.read_at).forEach((n) => { n.read_at = nowIso(); }); return { ok: true };
+    }],
+    ['GET', /^\/api\/protocol$/, () => { need('patient'); return { protocol: protocolFor(me.id) }; }],
+    ['GET', /^\/api\/meds$/, () => { need('patient'); return medsFor(me.id); }],
+    ['POST', /^\/api\/meds\/(\d+)\/log$/, (b, [id]) => {
+      need('patient');
+      const i = medLogs.findIndex((l) => l.medication_id === Number(id) && l.date === b.date && l.time === b.time);
+      if (i >= 0) medLogs.splice(i, 1);
+      if (b.status) medLogs.push({ medication_id: Number(id), patient_id: me.id, date: b.date, time: b.time, status: b.status });
+      return { ok: true };
+    }],
     ['GET', /^\/api\/doctors$/, () => users.filter((u) => u.role === 'doctor').map(({ id, name }) => ({ id, name }))],
     ['GET', /^\/api\/me$/, () => {
       need();
@@ -199,7 +287,11 @@
       const r = { id: ++bpSeq, patient_id: me.id, photo: addFile(URL.createObjectURL(b.photo)), systolic: sys, diastolic: dia,
         pulse: num(b.pulse), arm: b.arm || null, location: 'casa', recorded_by: me.id, values_source: sys || dia ? (b.values_source === 'ia' ? 'ia' : 'paciente') : null,
         taken_at: b.taken_at || nowIso(), notes: b.notes || null, doctor_comment: null, reviewed_at: null, created_at: sqlDate(Date.now()) };
-      bp.push(r); rollCam(); return r;
+      bp.push(r); rollCam();
+      if (Clinical.classifyBP(sys, dia, Clinical.targetOf(me)).urgent) {
+        notify(me.doctor_id, 'bp_alert', `Presión ${sys < 90 ? 'baja' : 'muy alta'}: ${me.name}`, `${sys}/${dia} mmHg${r.pulse ? ` · pulso ${r.pulse}` : ''}`, `#/paciente/${me.id}`);
+      }
+      return r;
     }],
     ['DELETE', /^\/api\/bp\/(\d+)$/, (_b, [id]) => {
       need('patient');
@@ -235,6 +327,7 @@
         const mine = bp.filter((r) => r.patient_id === u.id).sort(byDateDesc('taken_at'));
         const last = mine[0];
         return { id: u.id, name: u.name, email: u.email, phone: u.phone, birth_date: u.birth_date,
+          bp_target_sys: u.bp_target_sys, bp_target_dia: u.bp_target_dia, protocol_id: protocolFor(u.id)?.summary.state === 'finished' ? null : protocolFor(u.id)?.id ?? null,
           pending_bp: mine.filter((r) => !r.reviewed_at).length,
           pending_labs: labs.filter((l) => l.patient_id === u.id && !l.reviewed_at).length,
           last_bp: last ? { systolic: last.systolic, diastolic: last.diastolic, pulse: last.pulse, taken_at: last.taken_at } : null };
@@ -245,7 +338,46 @@
       const p = user(Number(id));
       return { patient: p, bp: bp.filter((r) => r.patient_id === p.id).sort(byDateDesc('taken_at')),
         labs: labs.filter((l) => l.patient_id === p.id).sort(byDateDesc('created_at')),
-        appointments: appointments.filter((a) => a.patient_id === p.id).map(apptView).sort(byDateDesc('starts_at')) };
+        appointments: appointments.filter((a) => a.patient_id === p.id).map(apptView).sort(byDateDesc('starts_at')),
+        protocol: protocolFor(p.id), ...medsFor(p.id) };
+    }],
+    ['PATCH', /^\/api\/doctor\/patients\/(\d+)$/, (b, [id]) => {
+      need('doctor');
+      const p = user(Number(id));
+      const sys = num(b.bp_target_sys), dia = num(b.bp_target_dia);
+      if ((sys === null) !== (dia === null)) throw new HttpError(400, 'Indica la meta sistólica y la diastólica.');
+      if (sys !== null && dia >= sys) throw new HttpError(400, 'La meta diastólica debe ser menor que la sistólica.');
+      Object.assign(p, { bp_target_sys: sys, bp_target_dia: dia });
+      if (sys) notify(p.id, 'target', 'Tu médico fijó tu meta de presión', `Menos de ${sys}/${dia} mmHg.`, '#/presion');
+      return p;
+    }],
+    ['POST', /^\/api\/doctor\/patients\/(\d+)\/protocol$/, (b, [id]) => {
+      need('doctor');
+      if (b.start_date < today) throw new HttpError(400, 'El protocolo no puede empezar en el pasado.');
+      if (b.morning_time >= '14:00' || b.evening_time < '14:00') throw new HttpError(400, 'La toma de la mañana debe ser antes de las 14:00 y la de la noche después.');
+      protocols.filter((x) => x.patient_id === Number(id) && x.status === 'active').forEach((x) => { x.status = 'cancelled'; });
+      protocols.push({ id: ++protocolSeq, patient_id: Number(id), doctor_id: me.id, start_date: b.start_date, days: Number(b.days) || 7,
+        morning_time: b.morning_time, evening_time: b.evening_time, tz: TZ, status: 'active', completed_notified: 0 });
+      notify(Number(id), 'protocol', 'Tu médico te indicó un protocolo de medición', `${b.days} días: 2 tomas a las ${b.morning_time} y 2 a las ${b.evening_time}.`, '#/presion');
+      return { id: protocolSeq, protocol: protocolFor(Number(id)) };
+    }],
+    ['POST', /^\/api\/doctor\/protocols\/(\d+)\/cancel$/, (_b, [id]) => {
+      need('doctor'); protocols.find((x) => x.id === Number(id)).status = 'cancelled'; return { ok: true };
+    }],
+    ['POST', /^\/api\/doctor\/patients\/(\d+)\/meds$/, (b, [id]) => {
+      need('doctor');
+      const times = Clinical.parseTimes(b.times);
+      if (!b.name) throw new HttpError(400, 'Escribe el nombre del medicamento.');
+      if (!times || !times.length) throw new HttpError(400, 'Indica entre 1 y 6 horarios, por ejemplo 08:00, 20:00.');
+      meds.push({ id: ++medSeq, patient_id: Number(id), name: b.name, dose: b.dose || null, times, instructions: b.instructions || null,
+        start_date: today, stopped_at: null, created_at: sqlDate(Date.now()) });
+      notify(Number(id), 'medication', 'Nuevo medicamento indicado', `${b.name} ${b.dose || ''} · ${times.join(', ')}`, '#/remedios');
+      return { id: medSeq };
+    }],
+    ['PATCH', /^\/api\/doctor\/meds\/(\d+)$/, (b, [id]) => {
+      need('doctor');
+      if (b.stop) meds.find((m) => m.id === Number(id)).stopped_at = nowIso();
+      return { ok: true };
     }],
     ['POST', /^\/api\/doctor\/patients\/(\d+)\/bp$/, (b, [id]) => {
       need('doctor');

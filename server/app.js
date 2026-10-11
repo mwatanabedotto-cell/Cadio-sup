@@ -8,6 +8,10 @@ const multer = require('multer');
 
 const { openDb, tx } = require('./db');
 const auth = require('./auth');
+const Clinical = require('../public/clinical');
+const { createNotifier } = require('./notify');
+const { createScheduler } = require('./scheduler');
+const { buildReport } = require('./report');
 
 const IMAGE_TYPES = {
   'image/jpeg': '.jpg',
@@ -70,6 +74,11 @@ function createApp(config = {}) {
   const secureCookies = Boolean(config.secureCookies);
   const doctorCode = config.doctorCode || null;
   const readBP = config.reader || null; // lector automático de fotos (opcional)
+  const push = config.push || null;     // emisor Web Push (opcional)
+  const defaultTz = Clinical.validTz(config.defaultTz) ? config.defaultTz : 'UTC';
+  const notifier = createNotifier({ db, push, webhookUrl: config.alertWebhookUrl || null });
+  const scheduler = createScheduler({ db, notifier, defaultTz });
+  const later = (promise) => promise.catch((err) => console.error('Error enviando aviso:', err.message));
 
   const app = express();
   app.disable('x-powered-by');
@@ -144,14 +153,46 @@ function createApp(config = {}) {
     role: u.role,
     doctor_id: u.doctor_id,
     birth_date: u.birth_date,
+    bp_target_sys: u.bp_target_sys ?? null,
+    bp_target_dia: u.bp_target_dia ?? null,
+    timezone: u.timezone ?? null,
   });
+
+  const tzOf = (u) => (Clinical.validTz(u?.timezone) ? u.timezone : defaultTz);
+  const isoDay = (v, label) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) || Number.isNaN(Date.parse(v))) throw new HttpError(400, `${label} no es una fecha válida.`);
+    return v;
+  };
+  const hhmm = (v, label) => {
+    const t = Clinical.parseTimes([v]);
+    if (!t || t.length !== 1) throw new HttpError(400, `${label} no es una hora válida (HH:MM).`);
+    return t[0];
+  };
+
+  /** Alerta al médico si una toma está en rango de urgencia (muy alta o baja). */
+  const checkAlert = (readingId) => {
+    const r = db.prepare(`
+      SELECT b.*, u.name AS patient_name, u.doctor_id, u.timezone, u.bp_target_sys, u.bp_target_dia
+      FROM bp_readings b JOIN users u ON u.id = b.patient_id WHERE b.id = ?`).get(readingId);
+    if (!r?.doctor_id) return;
+    const c = Clinical.classifyBP(r.systolic, r.diastolic, Clinical.targetOf(r));
+    if (!c.urgent) return;
+    const when = new Date(r.taken_at).toLocaleString('es', { timeZone: tzOf(r), dateStyle: 'short', timeStyle: 'short' });
+    later(notifier.notify(r.doctor_id, {
+      kind: 'bp_alert', urgent: true, external: true,
+      title: `${c.cls === 'low' ? 'Presión baja' : 'Presión muy alta'}: ${r.patient_name}`,
+      body: `${r.systolic}/${r.diastolic} mmHg${r.pulse ? ` · pulso ${r.pulse}` : ''} · ${when}${r.notes ? ` · "${r.notes}"` : ''}`,
+      url: `/#/paciente/${r.patient_id}`, patientId: r.patient_id,
+      extra: { systolic: r.systolic, diastolic: r.diastolic, pulse: r.pulse, taken_at: r.taken_at, level: c.cls },
+    }));
+  };
 
   // ---------- autenticación ----------
 
   app.get('/api/doctors', h(() =>
     db.prepare("SELECT id, name FROM users WHERE role = 'doctor' ORDER BY name").all()));
 
-  app.get('/api/config', h(() => ({ doctorSignup: Boolean(doctorCode), autoRead: Boolean(readBP) })));
+  app.get('/api/config', h(() => ({ doctorSignup: Boolean(doctorCode), autoRead: Boolean(readBP), push: Boolean(push) })));
 
   app.post('/api/auth/register', h((req, res) => {
     const b = req.body || {};
@@ -210,6 +251,60 @@ function createApp(config = {}) {
     return { user: publicUser(req.user), doctor };
   }));
 
+  app.post('/api/me/timezone', auth.requireUser, h((req) => {
+    const tz = String(req.body?.timezone || '');
+    if (!Clinical.validTz(tz)) throw new HttpError(400, 'Zona horaria inválida.');
+    db.prepare('UPDATE users SET timezone = ? WHERE id = ?').run(tz, req.user.id);
+    return { ok: true };
+  }));
+
+  // ---------- avisos y notificaciones push ----------
+
+  app.get('/api/notifications', auth.requireUser, h((req) => ({
+    items: db.prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 60').all(req.user.id),
+    unread: db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL').get(req.user.id).n,
+  })));
+
+  app.post('/api/notifications/read', auth.requireUser, h((req) => {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : null;
+    const now = new Date().toISOString();
+    if (ids?.length) {
+      const st = db.prepare('UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ? AND read_at IS NULL');
+      for (const id of ids) st.run(now, id, req.user.id);
+    } else {
+      db.prepare('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL').run(now, req.user.id);
+    }
+    return { ok: true };
+  }));
+
+  app.get('/api/push/key', auth.requireUser, h(() => {
+    if (!push) throw new HttpError(404, 'Las notificaciones push no están activadas en este servidor.');
+    return { publicKey: push.publicKey };
+  }));
+
+  app.post('/api/push/subscribe', auth.requireUser, h((req) => {
+    const sub = req.body?.subscription || {};
+    const endpoint = String(sub.endpoint || '');
+    if (!/^https:\/\//.test(endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) throw new HttpError(400, 'Suscripción inválida.');
+    db.prepare(`
+      INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?)
+      ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`)
+      .run(req.user.id, endpoint.slice(0, 1000), String(sub.keys.p256dh).slice(0, 200), String(sub.keys.auth).slice(0, 200));
+    return { ok: true };
+  }));
+
+  app.post('/api/push/unsubscribe', auth.requireUser, h((req) => {
+    db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?').run(String(req.body?.endpoint || ''), req.user.id);
+    return { ok: true };
+  }));
+
+  app.post('/api/push/test', auth.requireUser, async (req, res, next) => {
+    try {
+      const sent = await notifier.pushTo(req.user.id, { title: 'Cadio-sup', body: 'Las notificaciones funcionan en este dispositivo.', url: '/' });
+      res.json({ sent });
+    } catch (err) { next(err); }
+  });
+
   // ---------- paciente: presión arterial ----------
 
   const patient = auth.requireRole('patient');
@@ -244,6 +339,7 @@ function createApp(config = {}) {
         db.prepare(`
           UPDATE bp_readings SET systolic = ?, diastolic = ?, pulse = ?, values_source = 'ia'
           WHERE id = ? AND systolic IS NULL AND diastolic IS NULL`).run(r.systolic, r.diastolic, r.pulse, readingId);
+        checkAlert(readingId);
       })
       .catch((err) => console.error('Error en lectura automática:', err.message));
   };
@@ -263,7 +359,8 @@ function createApp(config = {}) {
       INSERT INTO bp_readings (patient_id, photo, systolic, diastolic, pulse, arm, location, values_source, recorded_by, taken_at, notes)
       VALUES (?, ?, ?, ?, ?, ?, 'casa', ?, ?, ?, ?)`).run(
       req.user.id, req.file.filename, systolic, diastolic, pulse, arm, source, req.user.id, takenAt, text(b.notes));
-    if (!hasValues) readInBackground(Number(lastInsertRowid), req.file.filename, req.file.mimetype);
+    if (hasValues) checkAlert(Number(lastInsertRowid));
+    else readInBackground(Number(lastInsertRowid), req.file.filename, req.file.mimetype);
     res.status(201);
     return db.prepare('SELECT * FROM bp_readings WHERE id = ?').get(lastInsertRowid);
   }));
@@ -278,6 +375,79 @@ function createApp(config = {}) {
     removeFile(row.photo);
     return { ok: true };
   }));
+
+  // ---------- protocolo AMPA y medicación (compartido) ----------
+
+  const latestProtocol = (patientId) => {
+    const p = db.prepare(`
+      SELECT * FROM protocols WHERE patient_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1`).get(patientId);
+    if (!p) return null;
+    const readings = db.prepare('SELECT * FROM bp_readings WHERE patient_id = ? AND taken_at >= ?')
+      .all(patientId, new Date(Date.parse(p.start_date) - 2 * 864e5).toISOString());
+    return { ...p, summary: Clinical.protocolSummary(p, readings) };
+  };
+
+  const medsOf = (patient) => {
+    const meds = db.prepare('SELECT * FROM medications WHERE patient_id = ? ORDER BY stopped_at IS NOT NULL, name').all(patient.id)
+      .map((m) => ({ ...m, times: JSON.parse(m.times), created_local: Clinical.createdLocal(m, tzOf(patient)) }));
+    const since = Clinical.addDays(Clinical.localParts(new Date(), tzOf(patient)).date, -30);
+    const logs = db.prepare('SELECT * FROM med_logs WHERE patient_id = ? AND date >= ? ORDER BY date, time').all(patient.id, since);
+    const tz = tzOf(patient);
+    return {
+      meds: meds.map((m) => ({ ...m, adherence: Clinical.adherence(m, logs, tz) })),
+      logs,
+      today: Clinical.localParts(new Date(), tz),
+    };
+  };
+
+  const sendReport = async (res, patientId, doctorId, days) => {
+    const patient = db.prepare('SELECT * FROM users WHERE id = ?').get(patientId);
+    const doc = db.prepare('SELECT * FROM users WHERE id = ?').get(doctorId);
+    const protocol = db.prepare('SELECT * FROM protocols WHERE patient_id = ? AND status = \'active\' ORDER BY id DESC LIMIT 1').get(patientId);
+    const pdf = await buildReport({
+      patient: { ...patient, timezone: tzOf(patient) },
+      doctor: doc || { name: '-' },
+      readings: db.prepare('SELECT * FROM bp_readings WHERE patient_id = ? ORDER BY taken_at').all(patientId),
+      labs: db.prepare('SELECT * FROM labs WHERE patient_id = ? ORDER BY created_at DESC').all(patientId),
+      protocol,
+      meds: db.prepare('SELECT * FROM medications WHERE patient_id = ?').all(patientId),
+      medLogs: db.prepare('SELECT * FROM med_logs WHERE patient_id = ?').all(patientId),
+      days,
+    });
+    const name = `informe-presion-${patient.name.normalize('NFD').replace(/[^\w]+/g, '-').toLowerCase()}.pdf`;
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${name}"`, 'Cache-Control': 'no-store' });
+    res.send(pdf);
+  };
+  const reportDays = (q) => Math.min(365, Math.max(7, Number(q) || 30));
+
+  app.get('/api/protocol', patient, h((req) => ({ protocol: latestProtocol(req.user.id) })));
+
+  app.get('/api/meds', patient, h((req) => medsOf(req.user)));
+
+  app.post('/api/meds/:id/log', patient, h((req) => {
+    const med = db.prepare('SELECT * FROM medications WHERE id = ? AND patient_id = ?').get(idParam(req), req.user.id);
+    if (!med) throw new HttpError(404, 'Medicamento no encontrado.');
+    const b = req.body || {};
+    const today = Clinical.localParts(new Date(), tzOf(req.user)).date;
+    const date = isoDay(b.date, 'La fecha');
+    if (date > today || date < Clinical.addDays(today, -7)) throw new HttpError(400, 'Solo puedes registrar dosis de los últimos 7 días.');
+    const time = hhmm(b.time, 'La hora');
+    if (!JSON.parse(med.times).includes(time)) throw new HttpError(400, 'Esa hora no corresponde a este medicamento.');
+    if (b.status === null || b.status === 'clear') {
+      db.prepare('DELETE FROM med_logs WHERE medication_id = ? AND date = ? AND time = ?').run(med.id, date, time);
+      return { ok: true };
+    }
+    if (!['taken', 'skipped'].includes(b.status)) throw new HttpError(400, 'Estado inválido.');
+    db.prepare(`
+      INSERT INTO med_logs (medication_id, patient_id, date, time, status, logged_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(medication_id, date, time) DO UPDATE SET status = excluded.status, logged_at = excluded.logged_at`)
+      .run(med.id, req.user.id, date, time, b.status, new Date().toISOString());
+    return { ok: true };
+  }));
+
+  app.get('/api/report.pdf', patient, async (req, res, next) => {
+    try { await sendReport(res, req.user.id, req.user.doctor_id, reportDays(req.query.days)); } catch (err) { next(err); }
+  });
 
   // ---------- paciente: laboratorios ----------
 
@@ -337,6 +507,12 @@ function createApp(config = {}) {
       return db.prepare('INSERT INTO appointments (slot_id, patient_id, doctor_id, reason) VALUES (?, ?, ?, ?)')
         .run(slot.id, req.user.id, req.user.doctor_id, reason).lastInsertRowid;
     });
+    const a = db.prepare(`${apptSql} WHERE a.id = ?`).get(id);
+    later(notifier.notify(req.user.doctor_id, {
+      kind: 'appointment', title: `Nueva solicitud de cita: ${req.user.name}`,
+      body: `${new Date(a.starts_at).toLocaleString('es', { timeZone: tzOf(req.user), dateStyle: 'full', timeStyle: 'short' })}${reason ? ` · ${reason}` : ''}`,
+      url: '/#/agenda', patientId: req.user.id,
+    }));
     res.status(201);
     return db.prepare(`${apptSql} WHERE a.id = ?`).get(id);
   }));
@@ -353,7 +529,7 @@ function createApp(config = {}) {
 
   const ownPatient = (req, patientId) => {
     const p = db.prepare(`
-      SELECT id, name, email, phone, birth_date, created_at FROM users
+      SELECT id, name, email, phone, birth_date, bp_target_sys, bp_target_dia, timezone, created_at FROM users
       WHERE id = ? AND role = 'patient' AND doctor_id = ?`).get(patientId, req.user.id);
     if (!p) throw new HttpError(404, 'Paciente no encontrado.');
     return p;
@@ -361,7 +537,8 @@ function createApp(config = {}) {
 
   app.get('/api/doctor/patients', doctor, h((req) =>
     db.prepare(`
-      SELECT u.id, u.name, u.email, u.phone, u.birth_date,
+      SELECT u.id, u.name, u.email, u.phone, u.birth_date, u.bp_target_sys, u.bp_target_dia,
+        (SELECT id FROM protocols p WHERE p.patient_id = u.id AND p.status = 'active' AND p.completed_notified = 0 LIMIT 1) AS protocol_id,
         (SELECT COUNT(*) FROM bp_readings b WHERE b.patient_id = u.id AND b.reviewed_at IS NULL) AS pending_bp,
         (SELECT COUNT(*) FROM labs l WHERE l.patient_id = u.id AND l.reviewed_at IS NULL) AS pending_labs,
         (SELECT json_object('systolic', b.systolic, 'diastolic', b.diastolic, 'pulse', b.pulse, 'taken_at', b.taken_at)
@@ -377,7 +554,102 @@ function createApp(config = {}) {
       bp: db.prepare('SELECT * FROM bp_readings WHERE patient_id = ? ORDER BY taken_at DESC LIMIT 500').all(p.id),
       labs: db.prepare('SELECT * FROM labs WHERE patient_id = ? ORDER BY created_at DESC').all(p.id),
       appointments: db.prepare(`${apptSql} WHERE a.patient_id = ? ORDER BY s.starts_at DESC`).all(p.id),
+      protocol: latestProtocol(p.id),
+      ...medsOf(p),
     };
+  }));
+
+  // Meta individual de presión (null para quitarla).
+  app.patch('/api/doctor/patients/:id', doctor, h((req) => {
+    const p = ownPatient(req, idParam(req));
+    const b = req.body || {};
+    const sys = int(b.bp_target_sys, 90, 160, 'La meta sistólica');
+    const dia = int(b.bp_target_dia, 50, 100, 'La meta diastólica');
+    if ((sys === null) !== (dia === null)) throw new HttpError(400, 'Indica la meta sistólica y la diastólica.');
+    if (sys !== null && dia >= sys) throw new HttpError(400, 'La meta diastólica debe ser menor que la sistólica.');
+    db.prepare('UPDATE users SET bp_target_sys = ?, bp_target_dia = ? WHERE id = ?').run(sys, dia, p.id);
+    if (sys !== null) {
+      later(notifier.notify(p.id, { kind: 'target', title: 'Tu médico fijó tu meta de presión', body: `Menos de ${sys}/${dia} mmHg.`, url: '/#/presion' }));
+    }
+    return ownPatient(req, p.id);
+  }));
+
+  app.get('/api/doctor/patients/:id/report.pdf', doctor, async (req, res, next) => {
+    try {
+      const p = ownPatient(req, idParam(req));
+      await sendReport(res, p.id, req.user.id, reportDays(req.query.days));
+    } catch (err) { next(err); }
+  });
+
+  // Indicar un protocolo AMPA. Reemplaza al protocolo activo anterior.
+  app.post('/api/doctor/patients/:id/protocol', doctor, h((req, res) => {
+    const p = ownPatient(req, idParam(req));
+    const b = req.body || {};
+    const tz = Clinical.validTz(p.timezone) ? p.timezone : Clinical.validTz(b.timezone) ? b.timezone : defaultTz;
+    const startDate = isoDay(b.start_date, 'La fecha de inicio');
+    if (startDate < Clinical.localParts(new Date(), tz).date) throw new HttpError(400, 'El protocolo no puede empezar en el pasado.');
+    const days = int(b.days, 3, 14, 'La duración') || 7;
+    const morning = hhmm(b.morning_time || '07:00', 'La hora de la mañana');
+    const evening = hhmm(b.evening_time || '19:00', 'La hora de la noche');
+    if (morning >= '14:00' || evening < '14:00') throw new HttpError(400, 'La toma de la mañana debe ser antes de las 14:00 y la de la noche después.');
+    const id = tx(db, () => {
+      db.prepare("UPDATE protocols SET status = 'cancelled' WHERE patient_id = ? AND status = 'active'").run(p.id);
+      return db.prepare(`
+        INSERT INTO protocols (patient_id, doctor_id, start_date, days, morning_time, evening_time, tz)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(p.id, req.user.id, startDate, days, morning, evening, tz).lastInsertRowid;
+    });
+    later(notifier.notify(p.id, {
+      kind: 'protocol', title: 'Tu médico te indicó un protocolo de medición',
+      body: `${days} días desde el ${startDate.split('-').reverse().join('/')}: 2 tomas a las ${morning} y 2 a las ${evening}.`,
+      url: '/#/presion',
+    }));
+    res.status(201);
+    return { id: Number(id), protocol: latestProtocol(p.id) };
+  }));
+
+  app.post('/api/doctor/protocols/:id/cancel', doctor, h((req) => {
+    const r = db.prepare("UPDATE protocols SET status = 'cancelled' WHERE id = ? AND doctor_id = ? AND status = 'active'")
+      .run(idParam(req), req.user.id);
+    if (!r.changes) throw new HttpError(404, 'Protocolo no encontrado.');
+    return { ok: true };
+  }));
+
+  app.post('/api/doctor/patients/:id/meds', doctor, h((req, res) => {
+    const p = ownPatient(req, idParam(req));
+    const b = req.body || {};
+    const name = text(b.name, 120);
+    if (!name) throw new HttpError(400, 'Escribe el nombre del medicamento.');
+    const times = Clinical.parseTimes(b.times);
+    if (!times || !times.length || times.length > 6) throw new HttpError(400, 'Indica entre 1 y 6 horarios, por ejemplo 08:00, 20:00.');
+    const startDate = b.start_date ? isoDay(b.start_date, 'La fecha de inicio') : Clinical.localParts(new Date(), tzOf(p)).date;
+    const { lastInsertRowid } = db.prepare(`
+      INSERT INTO medications (patient_id, name, dose, times, instructions, start_date, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(p.id, name, text(b.dose, 60), JSON.stringify(times), text(b.instructions, 300), startDate, req.user.id);
+    later(notifier.notify(p.id, {
+      kind: 'medication', title: 'Nuevo medicamento indicado', body: `${name}${b.dose ? ` ${text(b.dose, 60)}` : ''} · ${times.join(', ')}`, url: '/#/remedios',
+    }));
+    res.status(201);
+    return { id: Number(lastInsertRowid) };
+  }));
+
+  app.patch('/api/doctor/meds/:id', doctor, h((req) => {
+    const med = db.prepare(`
+      SELECT m.* FROM medications m JOIN users u ON u.id = m.patient_id WHERE m.id = ? AND u.doctor_id = ?`).get(idParam(req), req.user.id);
+    if (!med) throw new HttpError(404, 'Medicamento no encontrado.');
+    const b = req.body || {};
+    if (b.stop) {
+      db.prepare('UPDATE medications SET stopped_at = ? WHERE id = ?').run(new Date().toISOString(), med.id);
+      return { ok: true };
+    }
+    const times = b.times !== undefined ? Clinical.parseTimes(b.times) : JSON.parse(med.times);
+    if (!times || !times.length || times.length > 6) throw new HttpError(400, 'Indica entre 1 y 6 horarios, por ejemplo 08:00, 20:00.');
+    db.prepare('UPDATE medications SET name = ?, dose = ?, times = ?, instructions = ? WHERE id = ?').run(
+      b.name !== undefined ? (text(b.name, 120) || med.name) : med.name,
+      b.dose !== undefined ? text(b.dose, 60) : med.dose,
+      JSON.stringify(times),
+      b.instructions !== undefined ? text(b.instructions, 300) : med.instructions,
+      med.id);
+    return { ok: true };
   }));
 
   // El médico registra una toma (p. ej. medida en el consultorio). La foto es opcional.
@@ -423,6 +695,10 @@ function createApp(config = {}) {
       has('doctor_comment') ? text(b.doctor_comment, 1000) : row.doctor_comment,
       new Date().toISOString(),
       row.id);
+    const comment = has('doctor_comment') ? text(b.doctor_comment, 1000) : null;
+    if (comment && comment !== row.doctor_comment) {
+      later(notifier.notify(row.patient_id, { kind: 'comment', title: 'Tu médico comentó una toma', body: comment, url: '/#/presion' }));
+    }
     return db.prepare('SELECT * FROM bp_readings WHERE id = ?').get(row.id);
   }));
 
@@ -433,6 +709,10 @@ function createApp(config = {}) {
     if (!row) throw new HttpError(404, 'Laboratorio no encontrado.');
     db.prepare('UPDATE labs SET doctor_comment = ?, reviewed_at = ? WHERE id = ?')
       .run(text(req.body?.doctor_comment, 2000), new Date().toISOString(), row.id);
+    const comment = text(req.body?.doctor_comment, 2000);
+    if (comment && comment !== row.doctor_comment) {
+      later(notifier.notify(row.patient_id, { kind: 'comment', title: `Tu médico revisó: ${row.title}`, body: comment, url: '/#/labs' }));
+    }
     return db.prepare('SELECT * FROM labs WHERE id = ?').get(row.id);
   }));
 
@@ -483,7 +763,17 @@ function createApp(config = {}) {
     const r = db.prepare('UPDATE appointments SET status = ?, doctor_note = ? WHERE id = ? AND doctor_id = ?')
       .run(status, text(req.body?.doctor_note), idParam(req), req.user.id);
     if (!r.changes) throw new HttpError(404, 'Cita no encontrada.');
-    return db.prepare(`${apptSql} WHERE a.id = ?`).get(Number(req.params.id));
+    const a = db.prepare(`${apptSql} WHERE a.id = ?`).get(Number(req.params.id));
+    const label = { confirmed: 'confirmada', rejected: 'rechazada', cancelled: 'cancelada', done: 'realizada' }[status];
+    if (status !== 'done') {
+      const pu = db.prepare('SELECT timezone FROM users WHERE id = ?').get(a.patient_id);
+      later(notifier.notify(a.patient_id, {
+        kind: 'appointment', title: `Tu cita fue ${label}`,
+        body: `${new Date(a.starts_at).toLocaleString('es', { timeZone: tzOf(pu), dateStyle: 'full', timeStyle: 'short' })}${a.doctor_note ? ` · ${a.doctor_note}` : ''}`,
+        url: '/#/citas',
+      }));
+    }
+    return a;
   }));
 
   // ---------- archivos (solo dueño o su médico) ----------
@@ -520,6 +810,8 @@ function createApp(config = {}) {
   });
 
   app.locals.db = db;
+  app.locals.scheduler = scheduler;
+  app.locals.notifier = notifier;
   return app;
 }
 

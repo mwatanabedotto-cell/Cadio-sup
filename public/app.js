@@ -39,18 +39,12 @@ function localInputValue(date = new Date()) {
  * Clasificación orientativa de la presión arterial (adultos, ACC/AHA 2017).
  * Solo para destacar valores; la interpretación clínica es del médico.
  */
-function classifyBP(s, d) {
-  if (!s || !d) return { cls: '', label: 'Sin valores' };
-  if (s > 180 || d > 120) return { cls: 'crisis', label: 'Muy alta', alert: true };
-  if (s < 90 || d < 60) return { cls: 'low', label: 'Baja', alert: true };
-  if (s >= 140 || d >= 90) return { cls: 'h2', label: 'Alta (HTA 2)', alert: true };
-  if (s >= 130 || d >= 80) return { cls: 'h1', label: 'Alta (HTA 1)' };
-  if (s >= 120) return { cls: 'elev', label: 'Elevada' };
-  return { cls: 'ok', label: 'Normal' };
-}
+const classifyBP = (s, d, target = null) => Clinical.classifyBP(s, d, target);
+const myTarget = () => Clinical.targetOf(state.user);
+const targetText = (t) => (t ? `menos de ${t.sys}/${t.dia}` : '');
 
-function bpBadge(r) {
-  const c = classifyBP(r.systolic, r.diastolic);
+function bpBadge(r, target = null) {
+  const c = classifyBP(r.systolic, r.diastolic, target);
   return c.cls ? `<span class="badge ${c.cls}">${c.label}</span>` : '';
 }
 
@@ -274,7 +268,7 @@ function bpChart(readings) {
   <p class="muted"><span style="color:#c0392b">━</span> Sistólica &nbsp; <span style="color:#2f6fdb">━</span> Diastólica &nbsp; (líneas guía 140/90)${hasOffice ? ' &nbsp; ■ = medida en consultorio' : ''}</p>`;
 }
 
-function bpStats(readings) {
+function bpStats(readings, target = null) {
   const weekAgo = Date.now() - 7 * 864e5;
   // El promedio usa solo las tomas en casa: las del consultorio se comparan aparte.
   const week = readings.filter((r) => r.systolic && r.diastolic && atHome(r) && new Date(r.taken_at) > weekAgo);
@@ -282,7 +276,11 @@ function bpStats(readings) {
   return `<div class="stats">
     <div class="stat"><b>${week.length ? `${avg('systolic')}/${avg('diastolic')}` : '—'}</b><span>Promedio en casa 7 días</span></div>
     <div class="stat"><b>${week.length}</b><span>Tomas 7 días</span></div>
-    <div class="stat"><b>${readings.length}</b><span>Tomas totales</span></div>
+    ${target ? (() => {
+      const recent = readings.filter((r) => r.systolic && r.diastolic && atHome(r) && new Date(r.taken_at) > Date.now() - 14 * 864e5);
+      const ok = recent.filter((r) => classifyBP(r.systolic, r.diastolic, target).inTarget).length;
+      return `<div class="stat"><b>${recent.length ? Math.round((ok / recent.length) * 100) + '%' : '—'}</b><span>En meta 14 días</span></div>`;
+    })() : `<div class="stat"><b>${readings.length}</b><span>Tomas totales</span></div>`}
   </div>`;
 }
 
@@ -308,6 +306,274 @@ function officeVsHome(readings) {
     <div><span class="muted">Consultorio · ${office.length > 1 ? `últimas ${office.length}` : 'última'}</span><b>${o.s}/${o.d}</b></div>
     ${hint ? `<p class="hint">${hint}</p>` : ''}
   </div>`;
+}
+
+// ---------- protocolo AMPA ----------
+
+const fmtDay = (ymd, opts = { weekday: 'short', day: 'numeric', month: 'short' }) =>
+  new Date(`${ymd}T12:00:00`).toLocaleDateString('es', opts);
+
+function protocolCard(protocol, role) {
+  const s = protocol.summary;
+  const dots = (n) => `<span class="dots">${[0, 1].map((i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('')}</span>`;
+  const grid = `<div class="ampa-grid">${s.days.map((d, i) => `
+    <div class="ampa-day ${d.date === s.today ? 'today' : ''} ${i === 0 ? 'practice' : ''}">
+      <span class="muted">${i === 0 ? 'Práctica' : fmtDay(d.date, { weekday: 'short' })}</span>
+      <b>${fmtDay(d.date, { day: 'numeric' })}</b>
+      ${dots(d.morning)}${dots(d.evening)}
+    </div>`).join('')}</div>
+    <p class="muted" style="font-size:.8rem;margin-top:6px">Puntos: arriba mañana (${protocol.morning_time}), abajo noche (${protocol.evening_time}). 2 tomas en cada momento.</p>`;
+  const result = s.avg
+    ? `<div class="ampa-result ${s.high ? 'high' : 'ok'}"><span>Promedio (sin el día 1)</span>
+        <b>${s.avg.sys}/${s.avg.dia} mmHg</b>
+        <span>${s.counted} de ${s.expected} tomas (${s.completeness}%)${s.high ? ' · ≥135/85: elevado' : ' · <135/85'}${s.enough ? '' : ' · pocas tomas, interpretar con cautela'}</span></div>`
+    : '';
+
+  if (role === 'patient') {
+    const today = s.days.find((d) => d.date === s.today);
+    let head;
+    if (s.state === 'scheduled') head = `Empieza el <b>${fmtDay(protocol.start_date, { weekday: 'long', day: 'numeric', month: 'long' })}</b>.`;
+    else if (s.state === 'running') head = `<b>Día ${s.dayIndex} de ${protocol.days}</b>${s.dayIndex === 1 ? ' (día de práctica)' : ''} · Hoy: mañana ${Math.min(2, today.morning)}/2 · noche ${Math.min(2, today.evening)}/2`;
+    else head = '<b>¡Terminaste el protocolo!</b> Tu médico ya tiene el resultado.';
+    return `<div class="card ampa">
+      <h3>📋 Protocolo de medición (${protocol.days} días)</h3>
+      <p>${head}</p>
+      ${s.state !== 'finished' ? `<p class="muted">Cada día haz <b>2 tomas a las ${protocol.morning_time}</b> (antes del desayuno y de los remedios) y <b>2 a las ${protocol.evening_time}</b>, sentado tras 5 minutos de reposo, con 1 minuto entre tomas.</p>` : ''}
+      ${s.state === 'scheduled' ? '' : grid}
+    </div>`;
+  }
+  const stateText = { scheduled: `programado desde el ${fmtDay(protocol.start_date)}`, running: `en curso · día ${s.dayIndex} de ${protocol.days}`, finished: 'terminado' }[s.state];
+  return `<div class="card ampa">
+    <div class="row"><h3 class="grow">📋 AMPA ${protocol.days} días · ${stateText}</h3></div>
+    ${grid}
+    ${result || '<p class="muted">Aún no hay tomas válidas (el día 1 no cuenta).</p>'}
+    <div class="row" style="margin-top:10px;flex-wrap:wrap">
+      ${s.state !== 'finished' ? `<button class="btn small ghost-danger" type="button" data-ampa-cancel="${protocol.id}">Cancelar protocolo</button>` : ''}
+      <span class="grow"></span>
+      <button class="btn small secondary" type="button" data-ampa-replace>Indicar uno nuevo</button>
+    </div>
+  </div>`;
+}
+
+// ---------- medicación ----------
+
+const dosesOn = (meds, ymd) => meds
+  .filter((m) => !m.stopped_at || m.stopped_at.slice(0, 10) >= ymd)
+  .flatMap((m) => Clinical.expectedDoses(m, ymd, ymd, null).map((d) => ({ ...d, med: m })))
+  .sort((a, b) => (a.time < b.time ? -1 : 1));
+const logKey = (medId, date, time) => `${medId}|${date}|${time}`;
+
+function adherenceBadge(a) {
+  if (a.pct === null) return '<span class="badge">Sin dosis aún</span>';
+  const cls = a.pct >= 80 ? 'ok' : a.pct >= 50 ? 'pend' : 'h2';
+  return `<span class="badge ${cls}">Adherencia 14 días: ${a.pct}%</span>`;
+}
+
+function medsDoctorPane(meds, logs, today) {
+  const status = new Map(logs.map((l) => [logKey(l.medication_id, l.date, l.time), l.status]));
+  const last7 = [...Array(7)].map((_, i) => Clinical.addDays(today.date, i - 6));
+  const strip = (m) => `<div class="dose-strip" aria-label="Últimos 7 días">${last7.map((d) => {
+    const doses = Clinical.expectedDoses(m, d, d, today);
+    return `<div><span class="muted">${fmtDay(d, { weekday: 'narrow' })}</span>${doses.map((x) => {
+      const st = status.get(logKey(m.id, x.date, x.time));
+      return `<i class="${st === 'taken' ? 'taken' : st === 'skipped' ? 'skipped' : 'missing'}" title="${x.date} ${x.time}: ${st === 'taken' ? 'tomada' : st === 'skipped' ? 'no tomada' : 'sin registro'}"></i>`;
+    }).join('')}</div>`;
+  }).join('')}</div>`;
+  const active = meds.filter((m) => !m.stopped_at);
+  const stopped = meds.filter((m) => m.stopped_at);
+  return `
+    <button class="btn block" id="add-med" type="button">＋ Indicar medicamento</button>
+    <form class="card stack" id="med-form" hidden style="margin-top:12px">
+      <div class="grid2">
+        <div><label for="md-name">Medicamento</label><input id="md-name" name="name" placeholder="Losartán" required maxlength="120"></div>
+        <div><label for="md-dose">Dosis</label><input id="md-dose" name="dose" placeholder="50 mg" maxlength="60"></div>
+      </div>
+      <div><label for="md-times">Horarios</label><input id="md-times" name="times" placeholder="08:00, 20:00" required>
+        <div class="chips">${['08:00', '08:00, 20:00', '08:00, 14:00, 20:00', '22:00'].map((t) => `<button type="button" class="chip" data-times="${t}">${t}</button>`).join('')}</div></div>
+      <div><label for="md-ins">Indicaciones (opcional)</label><input id="md-ins" name="instructions" placeholder="Con el desayuno" maxlength="300"></div>
+      <div class="row"><span class="grow"></span><button type="button" class="btn small secondary" id="md-cancel">Cancelar</button><button class="btn small ok" type="submit">Guardar</button></div>
+    </form>
+    <div style="height:12px"></div>
+    ${active.map((m) => `<div class="card">
+      <div class="row top"><div class="grow">
+        <h3>💊 ${esc(m.name)} ${m.dose ? `<span class="muted">${esc(m.dose)}</span>` : ''}</h3>
+        <div class="muted">${m.times.join(' · ')}${m.instructions ? ` · ${esc(m.instructions)}` : ''}</div>
+        <div style="margin:6px 0">${adherenceBadge(m.adherence)} <span class="muted" style="font-size:.8rem">${m.adherence.taken} tomadas · ${m.adherence.skipped} no tomadas · ${m.adherence.missing} sin registro</span></div>
+        ${strip(m)}
+      </div>
+      <button class="btn small ghost-danger" type="button" data-stop-med="${m.id}">Suspender</button></div>
+    </div>`).join('') || '<div class="empty">Sin medicamentos indicados.</div>'}
+    ${stopped.length ? `<h2>Suspendidos</h2>${stopped.map((m) => `<div class="card muted">${esc(m.name)} ${esc(m.dose || '')} · suspendido el ${new Date(m.stopped_at).toLocaleDateString('es')}</div>`).join('')}` : ''}
+    <p class="muted" style="font-size:.8rem">● tomada · ✕ no tomada · ○ sin registro. El paciente recibe un recordatorio a cada hora indicada.</p>`;
+}
+
+function bindMedsDoctor(patientId) {
+  const form = $('#med-form');
+  $('#add-med').addEventListener('click', () => { form.hidden = false; $('#md-name').focus(); });
+  $('#md-cancel').addEventListener('click', () => { form.hidden = true; });
+  $$('[data-times]', form).forEach((b) => b.addEventListener('click', () => { form.times.value = b.dataset.times; }));
+  onSubmit(form, async (fd) => {
+    await api('POST', `/api/doctor/patients/${patientId}/meds`, Object.fromEntries(fd));
+    toast('💊 Medicamento indicado');
+    await render();
+    $('[data-tab=meds]')?.click();
+  });
+  view.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-stop-med]');
+    if (!b || !confirm('¿Suspender este medicamento?')) return;
+    try {
+      await api('PATCH', `/api/doctor/meds/${b.dataset.stopMed}`, { stop: true });
+      toast('Medicamento suspendido');
+      await render();
+      $('[data-tab=meds]')?.click();
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+async function viewPatientMeds() {
+  const { meds, logs, today } = await api('GET', '/api/meds');
+  const active = meds.filter((m) => !m.stopped_at);
+  const status = new Map(logs.map((l) => [logKey(l.medication_id, l.date, l.time), l.status]));
+  const yesterday = Clinical.addDays(today.date, -1);
+  const pendingYesterday = dosesOn(active, yesterday).filter((d) => !status.get(logKey(d.med.id, d.date, d.time)));
+
+  const doseRow = (d) => {
+    const st = status.get(logKey(d.med.id, d.date, d.time));
+    const late = d.date === today.date && d.time <= today.time && !st;
+    return `<div class="dose ${st || ''}">
+      <div class="dose-time ${late ? 'late' : ''}">${d.time}</div>
+      <div class="grow"><b>${esc(d.med.name)}</b> ${d.med.dose ? `<span class="muted">${esc(d.med.dose)}</span>` : ''}
+        ${d.med.instructions ? `<div class="muted" style="font-size:.85rem">${esc(d.med.instructions)}</div>` : ''}</div>
+      ${st ? `<div class="dose-done">${st === 'taken' ? '✓ Tomada' : '✕ No tomada'}
+          <button class="link" data-log="${d.med.id}|${d.date}|${d.time}|clear">Deshacer</button></div>`
+        : `<div class="dose-actions">
+          <button class="btn small ok" data-log="${d.med.id}|${d.date}|${d.time}|taken">Tomé</button>
+          <button class="btn small secondary" data-log="${d.med.id}|${d.date}|${d.time}|skipped">No</button></div>`}
+    </div>`;
+  };
+
+  view.innerHTML = `
+    <h1>Mis remedios</h1>
+    ${pushPrompt('meds')}
+    ${active.length ? `
+      <h2>Hoy · ${fmtDay(today.date, { weekday: 'long', day: 'numeric', month: 'long' })}</h2>
+      <div class="card stack">${dosesOn(active, today.date).map(doseRow).join('')}</div>
+      ${pendingYesterday.length ? `<h2>Ayer sin registrar</h2><div class="card stack">${pendingYesterday.map(doseRow).join('')}</div>` : ''}
+      <h2>Mis medicamentos</h2>
+      ${active.map((m) => `<div class="card"><h3>💊 ${esc(m.name)} ${m.dose ? `<span class="muted">${esc(m.dose)}</span>` : ''}</h3>
+        <div class="muted">${m.times.join(' · ')}${m.instructions ? ` · ${esc(m.instructions)}` : ''}</div>
+        <div style="margin-top:6px">${adherenceBadge(m.adherence)}</div></div>`).join('')}
+      <p class="muted" style="font-size:.85rem">No cambies ni suspendas un medicamento sin hablar con tu médico.</p>`
+    : '<div class="empty">Tu médico aún no registró medicamentos en la app.</div>'}`;
+
+  bindPushPrompt();
+  view.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-log]');
+    if (!b) return;
+    const [id, date, time, st] = b.dataset.log.split('|');
+    b.disabled = true;
+    try {
+      await api('POST', `/api/meds/${id}/log`, { date, time, status: st === 'clear' ? null : st });
+      if (st === 'taken') toast('✓ Registrado');
+      render();
+    } catch (err) { toast(err.message, true); b.disabled = false; }
+  });
+}
+
+// ---------- avisos y notificaciones push ----------
+
+async function refreshBell() {
+  if (!state.user) return;
+  try {
+    const { unread } = await api('GET', '/api/notifications');
+    const c = $('#bell-count');
+    c.textContent = unread > 9 ? '9+' : String(unread);
+    c.hidden = !unread;
+  } catch { /* sin conexión */ }
+}
+
+async function viewNotifications() {
+  const { items } = await api('GET', '/api/notifications');
+  const icon = { bp_alert: '🚨', protocol_done: '📋', protocol: '📋', appointment: '📅', comment: '💬', medication: '💊', target: '🎯' };
+  view.innerHTML = `
+    <h1>Avisos</h1>
+    ${items.length ? items.map((n) => `<a class="card row notif ${n.read_at ? '' : 'unread'} ${n.kind === 'bp_alert' ? 'urgent' : ''}" href="${esc(n.url || '#/')}">
+      <span class="notif-icon">${icon[n.kind] || '🔔'}</span>
+      <div class="grow"><b>${esc(n.title)}</b>${n.body ? `<div class="muted">${esc(n.body)}</div>` : ''}
+        <div class="muted" style="font-size:.78rem">${fmt.dateTime(n.created_at.replace(' ', 'T') + 'Z')}</div></div>
+    </a>`).join('') : '<div class="empty">No tienes avisos.</div>'}`;
+  if (items.some((n) => !n.read_at)) {
+    await api('POST', '/api/notifications/read', {}).catch(() => {});
+    refreshBell();
+  }
+}
+
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* sin almacenamiento */ } };
+
+function urlBase64ToUint8Array(b64) {
+  const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+async function pushState() {
+  if (!state.config.push) return 'disabled';
+  if (!pushSupported()) return 'unsupported';
+  if (Notification.permission === 'denied') return 'denied';
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = await reg?.pushManager.getSubscription();
+  return sub ? 'on' : 'off';
+}
+
+async function enablePush() {
+  if (!pushSupported()) {
+    throw new Error(isIOS()
+      ? 'En iPhone, primero agrega la app a la pantalla de inicio (Compartir → Agregar a inicio) y ábrela desde ese ícono.'
+      : 'Este navegador no permite notificaciones.');
+  }
+  if (await Notification.requestPermission() !== 'granted') throw new Error('No diste permiso para notificaciones. Puedes activarlo en los ajustes del navegador.');
+  const reg = await navigator.serviceWorker.ready;
+  const { publicKey } = await api('GET', '/api/push/key');
+  const sub = await reg.pushManager.getSubscription() ||
+    await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+  await api('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
+  await api('POST', '/api/push/test').catch(() => {});
+}
+
+async function disablePush() {
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = await reg?.pushManager.getSubscription();
+  if (sub) {
+    await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+    await sub.unsubscribe();
+  }
+}
+
+/** Tarjeta para activar las notificaciones (se oculta si ya están activas o si se descartó). */
+function pushPrompt(kind) {
+  if (!state.config.push || !pushSupported() || Notification.permission !== 'default' || lsGet('push-dismissed')) return '';
+  const text = {
+    doctor: 'Activa las notificaciones para recibir al instante las tomas muy altas o muy bajas de tus pacientes.',
+    patient: 'Activa las notificaciones para recibir los recordatorios de medición y las respuestas de tu médico.',
+    meds: 'Activa las notificaciones para que te recordemos cada remedio a su hora.',
+  }[kind];
+  return `<div class="card push-prompt row" id="push-prompt"><div class="grow">🔔 ${text}</div>
+    <div class="stack"><button class="btn small" id="push-on" type="button">Activar</button>
+    <button class="link" id="push-later" type="button">Ahora no</button></div></div>`;
+}
+
+function bindPushPrompt() {
+  $('#push-on')?.addEventListener('click', async () => {
+    try {
+      await enablePush();
+      toast('🔔 Notificaciones activadas');
+      $('#push-prompt')?.remove();
+    } catch (err) { toast(err.message, true); }
+  });
+  $('#push-later')?.addEventListener('click', () => { lsSet('push-dismissed', '1'); $('#push-prompt')?.remove(); });
 }
 
 // ---------- autenticación ----------
@@ -380,7 +646,7 @@ function readingCard(r, { canDelete = false } = {}) {
       <div class="grow">
         <div>${bpValue(r)}</div>
         <div class="muted">${readingMeta(r)}</div>
-        <div style="margin-top:4px">${bpBadge(r)} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada por el médico</span>' : '<span class="badge pend">Enviada</span>'}</div>
+        <div style="margin-top:4px">${bpBadge(r, myTarget())} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada por el médico</span>' : '<span class="badge pend">Enviada</span>'}</div>
         ${r.notes ? `<p class="muted">📝 ${esc(r.notes)}</p>` : ''}
         ${r.doctor_comment ? `<div class="comment"><b>Médico:</b> ${esc(r.doctor_comment)}</div>` : ''}
       </div>
@@ -389,21 +655,26 @@ function readingCard(r, { canDelete = false } = {}) {
 }
 
 async function viewPatientBP() {
-  const readings = await api('GET', '/api/bp');
+  const [readings, { protocol }] = await Promise.all([api('GET', '/api/bp'), api('GET', '/api/protocol')]);
   const last = readings.find((r) => r.systolic && r.diastolic);
+  const target = myTarget();
   view.innerHTML = `
     <h1>Mi presión</h1>
+    ${target ? `<p class="target-line">🎯 Tu meta: <b>${targetText(target)} mmHg</b></p>` : ''}
+    ${pushPrompt('patient')}
+    ${protocol ? protocolCard(protocol, 'patient') : ''}
     <a class="btn block big" href="#/presion/nueva">📷 Enviar nueva toma</a>
-    ${last && classifyBP(last.systolic, last.diastolic).alert ? `<div class="alert" style="margin-top:12px">
+    ${last && classifyBP(last.systolic, last.diastolic, target).alert ? `<div class="alert" style="margin-top:12px">
       Tu última toma (${last.systolic}/${last.diastolic}) está fuera de rango. Si tienes dolor de pecho, falta de aire,
       dolor de cabeza intenso, visión borrosa o debilidad, <b>acude a urgencias</b>.</div>` : ''}
     <h2>Resumen</h2>
-    ${bpStats(readings)}
+    ${bpStats(readings, target)}
     <div class="card">${bpChart(readings)}</div>
     <h2>Historial</h2>
     ${readings.length ? readings.map((r) => readingCard(r, { canDelete: true })).join('')
       : '<div class="empty">Aún no has enviado tomas. ¡Envía la primera!</div>'}`;
 
+  bindPushPrompt();
   view.addEventListener('click', async (e) => {
     const id = e.target.closest('[data-del]')?.dataset.del;
     if (!id || !confirm('¿Eliminar esta toma?')) return;
@@ -666,6 +937,7 @@ async function viewDoctorPatients() {
   const patients = await api('GET', '/api/doctor/patients');
   view.innerHTML = `
     <h1>Mis pacientes</h1>
+    ${pushPrompt('doctor')}
     <input id="q" type="search" placeholder="Buscar paciente…" aria-label="Buscar paciente" style="margin-bottom:12px">
     <div id="list">${patients.length ? patients.map((p) => {
       const lb = p.last_bp;
@@ -674,7 +946,8 @@ async function viewDoctorPatients() {
         <div class="grow">
           <h3>${esc(p.name)}</h3>
           <div class="muted">${lb ? `Última: ${lb.systolic && lb.diastolic ? `${lb.systolic}/${lb.diastolic}` : 'sin valores'} · ${fmt.dateTime(lb.taken_at)}` : 'Sin tomas aún'}</div>
-          <div style="margin-top:4px">${lb ? bpBadge(lb) : ''}
+          <div style="margin-top:4px">${lb ? bpBadge(lb, Clinical.targetOf(p)) : ''}
+            ${p.protocol_id ? '<span class="badge info">AMPA en curso</span>' : ''}
             ${p.pending_bp ? `<span class="badge pend">${p.pending_bp} toma(s) por revisar</span>` : ''}
             ${p.pending_labs ? `<span class="badge pend">${p.pending_labs} lab(s) por revisar</span>` : ''}</div>
         </div>
@@ -682,6 +955,7 @@ async function viewDoctorPatients() {
       </a>`;
     }).join('') : `<div class="empty">Aún no tienes pacientes. Comparte la dirección de la app con ellos:
       <br><b>${esc(location.origin)}</b><br>Al registrarse te elegirán como su médico.</div>`}</div>`;
+  bindPushPrompt();
   $('#q').addEventListener('input', (e) => {
     const q = e.target.value.trim().toLowerCase();
     $$('#list [data-name]').forEach((el) => { el.hidden = !el.dataset.name.includes(q); });
@@ -697,13 +971,33 @@ function age(birth) {
 }
 
 async function viewDoctorPatient(id) {
-  const { patient: p, bp, labs, appointments } = await api('GET', `/api/doctor/patients/${id}`);
+  const { patient: p, bp, labs, appointments, protocol, meds, logs, today } = await api('GET', `/api/doctor/patients/${id}`);
+  const target = Clinical.targetOf(p);
   view.innerHTML = `
     <a href="#/pacientes" class="link">‹ Pacientes</a>
     <h1>${esc(p.name)}</h1>
     <p class="muted">${[age(p.birth_date), p.phone && `📞 <a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>`, `✉️ ${esc(p.email)}`].filter(Boolean).join(' · ')}</p>
+    <div class="card row target-row">
+      <div class="grow">🎯 Meta: <b id="target-text">${target ? `${targetText(target)} mmHg` : 'sin meta individual'}</b>
+        <div class="muted" style="font-size:.8rem">${target ? 'Los colores y el % en meta usan esta meta.' : 'Se usan los umbrales generales (ACC/AHA).'}</div></div>
+      <button class="btn small secondary" id="edit-target" type="button">${target ? 'Cambiar' : 'Fijar meta'}</button>
+    </div>
+    <form class="card stack" id="target-form" hidden>
+      <label>Meta de presión (menor que)</label>
+      <div class="row">
+        <input name="bp_target_sys" type="number" inputmode="numeric" min="90" max="160" placeholder="130" value="${p.bp_target_sys ?? ''}" aria-label="Meta sistólica">
+        <span>/</span>
+        <input name="bp_target_dia" type="number" inputmode="numeric" min="50" max="100" placeholder="80" value="${p.bp_target_dia ?? ''}" aria-label="Meta diastólica">
+        <span class="muted">mmHg</span>
+      </div>
+      <div class="chips">${[[130, 80], [140, 90], [150, 90]].map(([a, b]) => `<button type="button" class="chip" data-preset="${a}/${b}">&lt;${a}/${b}</button>`).join('')}</div>
+      <div class="row"><button type="button" class="btn small secondary" id="clear-target">Quitar meta</button><span class="grow"></span><button class="btn small ok" type="submit">Guardar meta</button></div>
+    </form>
+    <a class="btn block secondary" href="/api/doctor/patients/${p.id}/report.pdf?days=30" target="_blank" rel="noopener">📄 Informe PDF (30 días)</a>
+    <div style="height:12px"></div>
     <div class="segmented" id="seg">
-      <button data-tab="bp" class="active">Presión (${bp.length})</button>
+      <button data-tab="bp" class="active">Presión</button>
+      <button data-tab="meds">Remedios</button>
       <button data-tab="labs">Labs (${labs.length})</button>
       <button data-tab="citas">Citas (${appointments.length})</button>
     </div>
@@ -731,8 +1025,23 @@ async function viewDoctorPatient(id) {
         </div>
       </form>
       <div style="height:12px"></div>
+      ${protocol ? protocolCard(protocol, 'doctor') : ''}
+      <form class="card stack" id="ampa-form" hidden>
+        <h3>Indicar protocolo AMPA</h3>
+        <p class="muted">2 tomas en la mañana y 2 en la noche, con 1 minuto entre tomas. El paciente recibe recordatorios y el día 1 no cuenta para el promedio.</p>
+        <div class="grid2">
+          <div><label for="am-start">Empieza el</label><input id="am-start" name="start_date" type="date" value="${Clinical.addDays(Clinical.localParts(new Date(), p.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone).date, 1)}" required></div>
+          <div><label for="am-days">Días</label><input id="am-days" name="days" type="number" min="3" max="14" value="7" required></div>
+        </div>
+        <div class="grid2">
+          <div><label for="am-m">Hora mañana</label><input id="am-m" name="morning_time" type="time" value="07:00" required></div>
+          <div><label for="am-e">Hora noche</label><input id="am-e" name="evening_time" type="time" value="19:00" required></div>
+        </div>
+        <div class="row"><span class="grow"></span><button type="button" class="btn small secondary" id="am-cancel">Cancelar</button><button class="btn small ok" type="submit">Indicar protocolo</button></div>
+      </form>
+      ${protocol && protocol.summary.state !== 'finished' ? '' : '<button class="btn block secondary" id="ampa-new" type="button">📋 Indicar protocolo AMPA</button><div style="height:12px"></div>'}
       ${officeVsHome(bp)}
-      ${bpStats(bp)}
+      ${bpStats(bp, target)}
       <div class="card">${bpChart(bp)}</div>
       ${bp.map((r) => `<div class="card">
         <div class="row top">
@@ -740,7 +1049,7 @@ async function viewDoctorPatient(id) {
           <div class="grow">
             <div>${bpValue(r)}</div>
             <div class="muted">${readingMeta(r)}</div>
-            <div style="margin-top:4px">${bpBadge(r)} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada</span>' : '<span class="badge pend">Nueva</span>'}</div>
+            <div style="margin-top:4px">${bpBadge(r, Clinical.targetOf(p))} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada</span>' : '<span class="badge pend">Nueva</span>'}</div>
             ${r.notes ? `<p class="muted">📝 ${esc(r.notes)}</p>` : ''}
           </div>
         </div>
@@ -754,6 +1063,9 @@ async function viewDoctorPatient(id) {
           <button class="btn small ${r.reviewed_at ? 'secondary' : 'ok'}" type="submit">${r.reviewed_at ? 'Actualizar' : '✓ Marcar revisada'}</button>
         </form>
       </div>`).join('') || '<div class="empty">Sin tomas.</div>'}
+    </section>
+    <section data-pane="meds" hidden>
+      ${medsDoctorPane(meds, logs, today)}
     </section>
     <section data-pane="labs" hidden>
       ${labs.map((l) => `${labCard(l)}
@@ -773,6 +1085,47 @@ async function viewDoctorPatient(id) {
     $$('#seg button').forEach((x) => x.classList.toggle('active', x === b));
     $$('[data-pane]').forEach((s) => { s.hidden = s.dataset.pane !== b.dataset.tab; });
   });
+
+  // Meta individual.
+  const tForm = $('#target-form');
+  $('#edit-target').addEventListener('click', () => { tForm.hidden = !tForm.hidden; });
+  $$('[data-preset]', tForm).forEach((b) => b.addEventListener('click', () => {
+    const [a, c] = b.dataset.preset.split('/');
+    tForm.bp_target_sys.value = a;
+    tForm.bp_target_dia.value = c;
+  }));
+  $('#clear-target').addEventListener('click', async () => {
+    await api('PATCH', `/api/doctor/patients/${p.id}`, { bp_target_sys: null, bp_target_dia: null }).catch((e) => toast(e.message, true));
+    toast('Meta eliminada');
+    render();
+  });
+  onSubmit(tForm, async (fd) => {
+    await api('PATCH', `/api/doctor/patients/${p.id}`, { bp_target_sys: fd.get('bp_target_sys'), bp_target_dia: fd.get('bp_target_dia') });
+    toast('🎯 Meta guardada');
+    render();
+  });
+
+  // Protocolo AMPA.
+  const aForm = $('#ampa-form');
+  const openAmpa = () => { aForm.hidden = false; aForm.scrollIntoView({ behavior: 'smooth', block: 'center' }); };
+  $('#ampa-new')?.addEventListener('click', openAmpa);
+  $('#am-cancel').addEventListener('click', () => { aForm.hidden = true; });
+  view.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-ampa-replace]')) openAmpa();
+    const cancel = e.target.closest('[data-ampa-cancel]');
+    if (cancel && confirm('¿Cancelar el protocolo?')) {
+      await api('POST', `/api/doctor/protocols/${cancel.dataset.ampaCancel}/cancel`).catch((err) => toast(err.message, true));
+      toast('Protocolo cancelado');
+      render();
+    }
+  });
+  onSubmit(aForm, async (fd) => {
+    await api('POST', `/api/doctor/patients/${p.id}/protocol`, { ...Object.fromEntries(fd), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    toast('📋 Protocolo indicado. El paciente recibirá recordatorios.');
+    render();
+  });
+
+  bindMedsDoctor(p.id);
 
   // Registrar una toma (consultorio o informada por el paciente).
   const newForm = $('#newbp');
@@ -922,6 +1275,12 @@ function viewProfile() {
       <p class="muted">${esc(u.email)}${u.phone ? ` · ${esc(u.phone)}` : ''}</p>
       <p class="muted">${u.role === 'doctor' ? 'Médico' : 'Paciente'}</p>
     </div>
+    <div class="card" id="push-card"><h3>🔔 Notificaciones en este teléfono</h3>
+      <p class="muted" id="push-status">Comprobando…</p>
+      <div class="row" style="flex-wrap:wrap" id="push-actions"></div></div>
+    ${u.role === 'patient' ? `<div class="card"><h3>📄 Mi informe</h3>
+      <p class="muted">Resumen de tus tomas, remedios y laboratorios para llevar a la consulta.</p>
+      <a class="btn small secondary" href="/api/report.pdf?days=30" target="_blank" rel="noopener">Descargar PDF (30 días)</a></div>` : ''}
     ${state.doctor ? `<div class="card"><h3>Mi médico</h3><p>${esc(state.doctor.name)}</p>
       ${state.doctor.phone ? `<a class="btn small secondary" href="tel:${esc(state.doctor.phone)}">📞 Llamar</a>` : ''}</div>` : ''}
     ${u.role === 'doctor' ? `<div class="card"><h3>Invitar pacientes</h3>
@@ -939,6 +1298,29 @@ function viewProfile() {
     <button class="btn block secondary" id="out">Cerrar sesión</button>
     <p class="muted" style="text-align:center;margin-top:16px">Esta app no reemplaza la atención de urgencias.<br>Ante síntomas graves acude al servicio de emergencias.</p>`;
   $('#out').addEventListener('click', logout);
+  const paintPush = async () => {
+    const st = await pushState();
+    const msg = {
+      disabled: 'Este servidor no tiene las notificaciones activadas.',
+      unsupported: isIOS() ? 'En iPhone, agrega la app a la pantalla de inicio (Compartir → Agregar a inicio) y ábrela desde ahí para activar las notificaciones.' : 'Este navegador no permite notificaciones.',
+      denied: 'Bloqueaste las notificaciones. Actívalas en los ajustes del navegador para este sitio.',
+      on: u.role === 'doctor' ? 'Activadas: recibirás las alertas de presión al instante.' : 'Activadas: recibirás recordatorios y avisos de tu médico.',
+      off: 'Desactivadas en este teléfono.',
+    }[st];
+    $('#push-status').textContent = msg;
+    $('#push-actions').innerHTML = st === 'off' ? '<button class="btn small" id="p-on">Activar</button>'
+      : st === 'on' ? '<button class="btn small secondary" id="p-test">Enviar prueba</button><button class="btn small ghost-danger" id="p-off">Desactivar</button>' : '';
+    $('#p-on')?.addEventListener('click', async () => {
+      try { await enablePush(); toast('🔔 Notificaciones activadas'); } catch (err) { toast(err.message, true); }
+      paintPush();
+    });
+    $('#p-off')?.addEventListener('click', async () => { await disablePush(); toast('Notificaciones desactivadas'); paintPush(); });
+    $('#p-test')?.addEventListener('click', async () => {
+      const r = await api('POST', '/api/push/test').catch((err) => toast(err.message, true));
+      if (r) toast(r.sent ? 'Prueba enviada' : 'No se pudo enviar la prueba');
+    });
+  };
+  paintPush();
   $('#share')?.addEventListener('click', async () => {
     const data = { title: 'Cadio-sup', text: 'Envíame tus tomas de presión por aquí:', url: location.origin };
     try {
@@ -953,7 +1335,8 @@ function viewProfile() {
 const TABS = {
   patient: [
     ['#/presion', '❤️', 'Presión'],
-    ['#/labs', '🧪', 'Laboratorios'],
+    ['#/remedios', '💊', 'Remedios'],
+    ['#/labs', '🧪', 'Labs'],
     ['#/citas', '📅', 'Citas'],
     ['#/perfil', '👤', 'Perfil'],
   ],
@@ -971,11 +1354,14 @@ const ROUTES = {
     '#/labs': viewPatientLabs,
     '#/labs/nuevo': viewNewLab,
     '#/citas': viewPatientAppointments,
+    '#/remedios': viewPatientMeds,
+    '#/avisos': viewNotifications,
     '#/perfil': viewProfile,
   },
   doctor: {
     '#/pacientes': viewDoctorPatients,
     '#/agenda': viewDoctorAgenda,
+    '#/avisos': viewNotifications,
     '#/perfil': viewProfile,
   },
 };
@@ -990,12 +1376,15 @@ async function render() {
   if (!state.user) {
     tabs.hidden = true;
     $('#logout').hidden = true;
+    $('#bell').hidden = true;
     return hash === '#/registro' ? viewRegister().catch(showError) : viewLogin();
   }
 
   const role = state.user.role;
   tabs.hidden = false;
   $('#logout').hidden = false;
+  $('#bell').hidden = false;
+  refreshBell();
   tabs.innerHTML = TABS[role].map(([h, icon, label]) =>
     `<a href="${h}" class="${hash.startsWith(h) ? 'active' : ''}"><span>${icon}</span>${label}</a>`).join('');
 
@@ -1029,6 +1418,9 @@ async function boot() {
     const me = await api('GET', '/api/me');
     state.user = me.user;
     state.doctor = me.doctor;
+    // Guarda la zona horaria del teléfono: los recordatorios se envían a la hora local.
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz && tz !== me.user.timezone) api('POST', '/api/me/timezone', { timezone: tz }).catch(() => {});
   } catch {
     state.user = null;
   }
@@ -1040,5 +1432,7 @@ async function boot() {
 
 $('#logout').addEventListener('click', logout);
 window.addEventListener('hashchange', render);
+setInterval(refreshBell, 60e3);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshBell(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 boot();

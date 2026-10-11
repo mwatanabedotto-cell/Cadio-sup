@@ -9,6 +9,10 @@ App web móvil (instalable en el teléfono) para el seguimiento de la presión a
 - Ve su historial, promedio de 7 días, gráfico de tendencia y los comentarios del médico.
 - 🧪 Envía laboratorios como foto o PDF.
 - 📅 Agenda citas eligiendo un horario libre de su médico, y puede cancelarlas.
+- 🎯 Ve su meta de presión y qué porcentaje de sus tomas está en meta.
+- 📋 Sigue el protocolo de automedición (AMPA) que le indica el médico, con recordatorios y avance día por día.
+- 💊 Ve sus remedios del día y marca "Tomé / No"; recibe un recordatorio a cada hora.
+- 🔔 Recibe avisos: recordatorios, comentarios del médico, citas confirmadas. Descarga su informe en PDF.
 
 **Médico**
 - 👥 Lista de pacientes ordenada por lo que falta revisar, con la última toma y alertas de color.
@@ -18,6 +22,11 @@ App web móvil (instalable en el teléfono) para el seguimiento de la presión a
 - 🩺 **Registra tomas él mismo** (p. ej. medidas en el consultorio, o informadas por teléfono): valores, lugar, brazo, hora, comentario y foto opcional. El paciente las ve en su historial y no puede borrarlas.
 - Compara el promedio en casa (14 días) con las últimas tomas de consultorio y avisa cuando el patrón sugiere **efecto de bata blanca** o **hipertensión enmascarada** (umbrales ESH: casa ≥135/85, consultorio ≥140/90). En el gráfico, las tomas de consultorio se marcan con un cuadrado.
 - 📅 Publica horarios (rango de días/horas y duración) y confirma, rechaza o cierra citas.
+- 🚨 **Avisos inmediatos** cuando llega una toma muy alta (>180/120) o baja (<90/60): en la app (campana), notificación push al teléfono y, opcionalmente, a un webhook (para WhatsApp, correo, etc.). También avisos de nuevas citas y del fin de cada AMPA.
+- 🎯 **Meta por paciente** (p. ej. <130/80): colores, alertas y "% en meta" usan la meta individual.
+- 📋 **Protocolo AMPA**: indica N días (3–14) con 2 tomas en la mañana y 2 en la noche; el paciente recibe recordatorios; el día 1 no cuenta; al terminar llega el promedio con la interpretación según el umbral domiciliario ESH (135/85).
+- 💊 **Medicación y adherencia**: indica fármaco, dosis, horarios e indicaciones; ve la adherencia de 14 días y un registro de los últimos 7 días por dosis.
+- 📄 **Informe PDF** del paciente: promedios (casa 7/30 días, consultorio), % en meta, tomas en alerta, gráfico, resultado AMPA, medicación con adherencia, tabla de tomas y laboratorios.
 
 La clasificación de colores (Normal / Elevada / HTA 1 / HTA 2 / Muy alta / Baja) sigue los umbrales ACC/AHA 2017 y es solo orientativa.
 
@@ -52,6 +61,20 @@ En el teléfono, usa "Agregar a la pantalla de inicio" para instalarla como app.
 | `ANTHROPIC_API_KEY` | Clave de la API de Claude. Al definirla se activa la lectura automática de fotos. |
 | `AUTO_READ`      | `false` para desactivar la lectura automática aunque haya clave; `true` para activarla con otras credenciales (`ant auth login`). |
 | `CLAUDE_MODEL`   | Modelo usado para leer las fotos (por defecto `claude-opus-5-5`).             |
+| `PUSH`           | `false` para desactivar las notificaciones push (activadas por defecto).      |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | Claves para push. Si no se definen, se generan una vez y se guardan en `DATA_DIR/vapid.json`. |
+| `VAPID_SUBJECT`  | Contacto para los servicios push, p. ej. `mailto:tu@correo.com`.              |
+| `ALERT_WEBHOOK_URL` | URL que recibe un POST JSON con cada alerta de presión (para reenviarla por WhatsApp, SMS o correo con n8n, Make, Zapier, Twilio…). |
+| `DEFAULT_TZ`     | Zona horaria si el teléfono del paciente aún no la informó (p. ej. `America/Sao_Paulo`). |
+
+## Avisos y recordatorios
+
+- **Push al teléfono:** cada usuario lo activa en *Perfil → Notificaciones* (o en la tarjeta que aparece al inicio). En Android funciona desde Chrome; en **iPhone hay que agregar la app a la pantalla de inicio** (iOS 16.4+) y abrirla desde ese ícono.
+- **Alertas clínicas al médico:** toma >180/120 o <90/60 (también cuando la IA lee la foto después). Llegan a la campana de la app, por push (alta prioridad) y al webhook si está configurado.
+- **Webhook:** cuerpo de ejemplo
+  `{"kind":"bp_alert","title":"Presión muy alta: Ana López","body":"190/118 mmHg · pulso 96 · 11/10/26 07:24","systolic":190,"diastolic":118,"pulse":96,"level":"crisis","patient_id":2,…}`.
+- **Recordatorios al paciente** (cada minuto se revisa; se envían dentro de los 30 minutos siguientes a la hora fijada, una sola vez): tomas del AMPA en la mañana y en la noche, y cada dosis de medicamento que aún no se registró.
+- Las horas siempre se calculan en la zona horaria del teléfono del paciente.
 
 ## Lectura automática de los números
 
@@ -98,7 +121,8 @@ npm test      # pruebas de la API
 Estructura:
 
 ```
-server/   API Express + SQLite (app.js, db.js, auth.js, reader.js, index.js)
+server/   API Express + SQLite (app.js, db.js, auth.js, reader.js, notify.js, scheduler.js, report.js, index.js)
+public/clinical.js  Lógica clínica compartida por servidor y app (metas, AMPA, adherencia)
 public/   Frontend (HTML/CSS/JS sin framework), PWA con service worker
 test/     Pruebas con node:test
 ```

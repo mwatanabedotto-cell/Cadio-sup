@@ -51,7 +51,8 @@ function destroySession(db, req, res) {
 /** Middleware: carga req.user si hay una sesión válida. */
 function loadUser(db) {
   const findSession = db.prepare(`
-    SELECT u.id, u.name, u.email, u.phone, u.role, u.doctor_id, u.birth_date
+    SELECT u.id, u.name, u.email, u.phone, u.role, u.doctor_id, u.birth_date,
+           u.bp_target_sys, u.bp_target_dia, u.timezone
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ?`);
   return (req, _res, next) => {
