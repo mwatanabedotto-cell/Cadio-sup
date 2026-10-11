@@ -80,6 +80,12 @@ Protecciones: el servidor descarta lecturas fuera de rango fisiológico o incohe
 - Son datos de salud: antes de usarla con pacientes reales revisa la normativa de tu país (p. ej. LGPD en Brasil, leyes de protección de datos personales/sanitarios), el consentimiento informado y dónde se alojan los datos.
 - La app **no sustituye la atención de urgencias** y lo indica a los pacientes cuando una toma sale fuera de rango.
 
+## Demo sin servidor
+
+`node demo/build.js salida.html` genera una página HTML autocontenida con la app, datos de ejemplo
+(una médica y tres pacientes), un servidor simulado en el navegador y una cámara que muestra un tensiómetro
+dibujado. Sirve para mostrar la app sin instalar nada; los datos se pierden al recargar.
+
 ## Desarrollo
 
 ```bash
