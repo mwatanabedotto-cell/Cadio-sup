@@ -1,0 +1,13 @@
+{
+  "name": "Cadio-sup",
+  "short_name": "Cadio-sup",
+  "description": "Envía tus tomas de presión, laboratorios y agenda citas con tu médico.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#c0392b",
+  "lang": "es",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

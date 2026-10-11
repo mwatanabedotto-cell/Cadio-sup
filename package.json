@@ -1,0 +1,19 @@
+{
+  "name": "cadio-sup",
+  "version": "1.0.0",
+  "description": "App para que pacientes envíen fotos de sus tomas de presión, laboratorios y agenden citas con su médico.",
+  "main": "server/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server/index.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch server/index.js",
+    "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2"
+  }
+}
