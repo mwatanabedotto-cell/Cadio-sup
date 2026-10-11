@@ -54,7 +54,22 @@ function bpBadge(r) {
   return c.cls ? `<span class="badge ${c.cls}">${c.label}</span>` : '';
 }
 
+/** Miniatura de la foto, o un marcador si la toma no tiene foto (registrada por el médico). */
+function photoThumb(r) {
+  if (!r.photo) return '<div class="thumb doc" title="Toma registrada por el médico, sin foto" aria-hidden="true">🩺</div>';
+  return `<button class="thumb" data-zoom="/files/${esc(r.photo)}" data-caption="${esc(fmt.dateTime(r.taken_at))}" aria-label="Ver foto">
+    <img class="thumb" src="/files/${esc(r.photo)}" alt="Foto del tensiómetro" loading="lazy"></button>`;
+}
+
+function readingMeta(r) {
+  return `${fmt.dateTime(r.taken_at)}${r.location === 'consultorio' ? ' · en consultorio' : ''}${r.arm ? ` · brazo ${esc(r.arm)}` : ''}`;
+}
+
+const byDoctor = (r) => r.recorded_by && r.recorded_by !== r.patient_id;
+const atHome = (r) => r.location !== 'consultorio';
+
 function sourceBadge(r) {
+  if (byDoctor(r)) return '<span class="badge info">🩺 Registrada por el médico</span>';
   if (r.values_source === 'ia') return '<span class="badge ai" title="Valores leídos automáticamente de la foto">🤖 Leído por IA</span>';
   if (r.values_source === 'medico') return '<span class="badge info">Valores corregidos por el médico</span>';
   return '';
@@ -237,8 +252,14 @@ function bpChart(readings) {
   const x = (i) => L + (i * (W - L - R)) / (pts.length - 1);
   const y = (v) => T + ((max - v) * (H - T - B)) / (max - min);
   const line = (k) => pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[k]).toFixed(1)}`).join('');
-  const dots = (k, color) => pts.map((p, i) =>
-    `<circle cx="${x(i).toFixed(1)}" cy="${y(p[k]).toFixed(1)}" r="3" fill="${color}"><title>${fmt.dateTime(p.taken_at)}: ${p.systolic}/${p.diastolic}</title></circle>`).join('');
+  const dots = (k, color) => pts.map((p, i) => {
+    const cx = x(i).toFixed(1), cy = y(p[k]).toFixed(1);
+    const tip = `<title>${fmt.dateTime(p.taken_at)}: ${p.systolic}/${p.diastolic}${atHome(p) ? '' : ' (consultorio)'}</title>`;
+    return atHome(p)
+      ? `<circle cx="${cx}" cy="${cy}" r="3" fill="${color}">${tip}</circle>`
+      : `<rect x="${cx - 4.5}" y="${cy - 4.5}" width="9" height="9" fill="${color}" stroke="var(--card)" stroke-width="1.5">${tip}</rect>`;
+  }).join('');
+  const hasOffice = pts.some((p) => !atHome(p));
   const ref = (v, label) => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" stroke-opacity=".25" stroke-dasharray="4 4"/>
     <text x="2" y="${y(v) + 3}">${label}</text>`;
   const step = Math.ceil(pts.length / 6);
@@ -250,17 +271,42 @@ function bpChart(readings) {
     <path d="${line('diastolic')}" fill="none" stroke="#2f6fdb" stroke-width="2.5"/>
     ${dots('systolic', '#c0392b')}${dots('diastolic', '#2f6fdb')}${xlabels}
   </svg>
-  <p class="muted"><span style="color:#c0392b">━</span> Sistólica &nbsp; <span style="color:#2f6fdb">━</span> Diastólica &nbsp; (líneas guía 140/90)</p>`;
+  <p class="muted"><span style="color:#c0392b">━</span> Sistólica &nbsp; <span style="color:#2f6fdb">━</span> Diastólica &nbsp; (líneas guía 140/90)${hasOffice ? ' &nbsp; ■ = medida en consultorio' : ''}</p>`;
 }
 
 function bpStats(readings) {
   const weekAgo = Date.now() - 7 * 864e5;
-  const week = readings.filter((r) => r.systolic && r.diastolic && new Date(r.taken_at) > weekAgo);
+  // El promedio usa solo las tomas en casa: las del consultorio se comparan aparte.
+  const week = readings.filter((r) => r.systolic && r.diastolic && atHome(r) && new Date(r.taken_at) > weekAgo);
   const avg = (k) => Math.round(week.reduce((a, r) => a + r[k], 0) / week.length);
   return `<div class="stats">
-    <div class="stat"><b>${week.length ? `${avg('systolic')}/${avg('diastolic')}` : '—'}</b><span>Promedio 7 días</span></div>
+    <div class="stat"><b>${week.length ? `${avg('systolic')}/${avg('diastolic')}` : '—'}</b><span>Promedio en casa 7 días</span></div>
     <div class="stat"><b>${week.length}</b><span>Tomas 7 días</span></div>
     <div class="stat"><b>${readings.length}</b><span>Tomas totales</span></div>
+  </div>`;
+}
+
+/**
+ * Compara la presión en casa con la del consultorio (umbrales ESH: casa ≥135/85, consultorio ≥140/90).
+ * Es una ayuda para el médico, no un diagnóstico.
+ */
+function officeVsHome(readings) {
+  const valid = readings.filter((r) => r.systolic && r.diastolic);
+  const home = valid.filter((r) => atHome(r) && new Date(r.taken_at) > Date.now() - 14 * 864e5);
+  const office = valid.filter((r) => !atHome(r)).slice(0, 3);
+  if (!home.length || !office.length) return '';
+  const avg = (list, k) => Math.round(list.reduce((a, r) => a + r[k], 0) / list.length);
+  const h = { s: avg(home, 'systolic'), d: avg(home, 'diastolic') };
+  const o = { s: avg(office, 'systolic'), d: avg(office, 'diastolic') };
+  const homeHigh = h.s >= 135 || h.d >= 85;
+  const officeHigh = o.s >= 140 || o.d >= 90;
+  let hint = '';
+  if (officeHigh && !homeHigh) hint = 'En consultorio sale alta y en casa no: considerar efecto de bata blanca.';
+  else if (!officeHigh && homeHigh) hint = 'En casa sale alta y en consultorio no: considerar hipertensión enmascarada.';
+  return `<div class="card compare">
+    <div><span class="muted">Casa · 14 días (${home.length})</span><b>${h.s}/${h.d}</b></div>
+    <div><span class="muted">Consultorio · ${office.length > 1 ? `últimas ${office.length}` : 'última'}</span><b>${o.s}/${o.d}</b></div>
+    ${hint ? `<p class="hint">${hint}</p>` : ''}
   </div>`;
 }
 
@@ -330,11 +376,10 @@ async function viewRegister() {
 function readingCard(r, { canDelete = false } = {}) {
   return `<div class="card">
     <div class="row top">
-      <button class="thumb" data-zoom="/files/${esc(r.photo)}" data-caption="${esc(fmt.dateTime(r.taken_at))}" aria-label="Ver foto">
-        <img class="thumb" src="/files/${esc(r.photo)}" alt="Foto del tensiómetro" loading="lazy"></button>
+      ${photoThumb(r)}
       <div class="grow">
         <div>${bpValue(r)}</div>
-        <div class="muted">${fmt.dateTime(r.taken_at)}${r.arm ? ` · brazo ${esc(r.arm)}` : ''}</div>
+        <div class="muted">${readingMeta(r)}</div>
         <div style="margin-top:4px">${bpBadge(r)} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada por el médico</span>' : '<span class="badge pend">Enviada</span>'}</div>
         ${r.notes ? `<p class="muted">📝 ${esc(r.notes)}</p>` : ''}
         ${r.doctor_comment ? `<div class="comment"><b>Médico:</b> ${esc(r.doctor_comment)}</div>` : ''}
@@ -663,15 +708,38 @@ async function viewDoctorPatient(id) {
       <button data-tab="citas">Citas (${appointments.length})</button>
     </div>
     <section data-pane="bp">
+      <button class="btn block" id="addbp" type="button">＋ Registrar presión</button>
+      <form class="card stack" id="newbp" hidden style="margin-top:12px">
+        <h3>Nueva toma registrada por mí</h3>
+        <div class="grid3">
+          <div><label for="nb-s">Sistólica</label><input id="nb-s" name="systolic" type="number" inputmode="numeric" min="50" max="300" required></div>
+          <div><label for="nb-d">Diastólica</label><input id="nb-d" name="diastolic" type="number" inputmode="numeric" min="30" max="200" required></div>
+          <div><label for="nb-p">Pulso</label><input id="nb-p" name="pulse" type="number" inputmode="numeric" min="20" max="250"></div>
+        </div>
+        <div class="grid2">
+          <div><label for="nb-loc">Lugar</label><select id="nb-loc" name="location"><option value="consultorio">Consultorio</option><option value="casa">Casa (informada)</option></select></div>
+          <div><label for="nb-arm">Brazo</label><select id="nb-arm" name="arm"><option value="">—</option><option value="izquierdo">Izquierdo</option><option value="derecho">Derecho</option></select></div>
+        </div>
+        <div><label for="nb-t">Fecha y hora</label><input id="nb-t" name="taken_at" type="datetime-local" value="${localInputValue()}" max="${localInputValue()}" required></div>
+        <div><label for="nb-c">Comentario para el paciente (opcional)</label><textarea id="nb-c" name="doctor_comment" maxlength="1000"></textarea></div>
+        <div id="nb-ph"></div>
+        <div class="row" style="flex-wrap:wrap">
+          <button type="button" class="btn small secondary" id="nb-cam">📷 Adjuntar foto (opcional)</button>
+          <span class="grow"></span>
+          <button type="button" class="btn small secondary" id="nb-cancel">Cancelar</button>
+          <button type="submit" class="btn small ok">Guardar toma</button>
+        </div>
+      </form>
+      <div style="height:12px"></div>
+      ${officeVsHome(bp)}
       ${bpStats(bp)}
       <div class="card">${bpChart(bp)}</div>
       ${bp.map((r) => `<div class="card">
         <div class="row top">
-          <button class="thumb" data-zoom="/files/${esc(r.photo)}" data-caption="${esc(fmt.dateTime(r.taken_at))}" aria-label="Ver foto">
-            <img class="thumb" src="/files/${esc(r.photo)}" alt="Foto del tensiómetro" loading="lazy"></button>
+          ${photoThumb(r)}
           <div class="grow">
             <div>${bpValue(r)}</div>
-            <div class="muted">${fmt.dateTime(r.taken_at)}${r.arm ? ` · brazo ${esc(r.arm)}` : ''}</div>
+            <div class="muted">${readingMeta(r)}</div>
             <div style="margin-top:4px">${bpBadge(r)} ${sourceBadge(r)} ${r.reviewed_at ? '<span class="badge info">Revisada</span>' : '<span class="badge pend">Nueva</span>'}</div>
             ${r.notes ? `<p class="muted">📝 ${esc(r.notes)}</p>` : ''}
           </div>
@@ -704,6 +772,33 @@ async function viewDoctorPatient(id) {
     if (!b) return;
     $$('#seg button').forEach((x) => x.classList.toggle('active', x === b));
     $$('[data-pane]').forEach((s) => { s.hidden = s.dataset.pane !== b.dataset.tab; });
+  });
+
+  // Registrar una toma (consultorio o informada por el paciente).
+  const newForm = $('#newbp');
+  let newPhoto = null;
+  $('#addbp').addEventListener('click', () => {
+    newForm.hidden = false;
+    $('#addbp').hidden = true;
+    $('#nb-s').focus();
+  });
+  $('#nb-cancel').addEventListener('click', () => {
+    newForm.hidden = true;
+    $('#addbp').hidden = false;
+  });
+  $('#nb-cam').addEventListener('click', async () => {
+    const blob = await takePhoto();
+    if (!blob) return;
+    newPhoto = blob;
+    $('#nb-ph').innerHTML = `<img class="preview" src="${URL.createObjectURL(blob)}" alt="Vista previa">`;
+    $('#nb-cam').textContent = '🔄 Cambiar foto';
+  });
+  onSubmit(newForm, async (fd) => {
+    fd.set('taken_at', new Date(fd.get('taken_at')).toISOString());
+    if (newPhoto) fd.set('photo', newPhoto, 'toma.jpg');
+    await api('POST', `/api/doctor/patients/${p.id}/bp`, fd);
+    toast('✅ Toma registrada');
+    render();
   });
 
   const numOrNull = (v) => (v === '' || v === null ? null : Number(v));

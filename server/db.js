@@ -4,6 +4,26 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
+// Tabla de tomas de presión (también se usa para migrar bases antiguas).
+const BP_TABLE = `
+CREATE TABLE IF NOT EXISTS bp_readings (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  patient_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  photo          TEXT,            -- obligatoria si la envía el paciente; opcional si la registra el médico
+  systolic       INTEGER,
+  diastolic      INTEGER,
+  pulse          INTEGER,
+  arm            TEXT,
+  location       TEXT,            -- 'casa' | 'consultorio'
+  values_source  TEXT,            -- 'paciente' | 'ia' | 'medico'
+  recorded_by    INTEGER REFERENCES users(id),
+  taken_at       TEXT NOT NULL,
+  notes          TEXT,
+  doctor_comment TEXT,
+  reviewed_at    TEXT,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);`;
+
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
@@ -26,21 +46,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS bp_readings (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  patient_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  photo          TEXT NOT NULL,
-  systolic       INTEGER,
-  diastolic      INTEGER,
-  pulse          INTEGER,
-  arm            TEXT,
-  values_source  TEXT,            -- 'paciente' | 'ia' | 'medico'
-  taken_at       TEXT NOT NULL,
-  notes          TEXT,
-  doctor_comment TEXT,
-  reviewed_at    TEXT,
-  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
-);
+${BP_TABLE}
 CREATE INDEX IF NOT EXISTS idx_bp_patient ON bp_readings(patient_id, taken_at);
 
 CREATE TABLE IF NOT EXISTS labs (
@@ -91,8 +97,23 @@ function openDb(dataDir) {
 
 /** Cambios de esquema para bases de datos creadas con versiones anteriores. */
 function migrate(db) {
-  const cols = db.prepare('PRAGMA table_info(bp_readings)').all().map((c) => c.name);
-  if (!cols.includes('values_source')) db.exec('ALTER TABLE bp_readings ADD COLUMN values_source TEXT');
+  const info = db.prepare('PRAGMA table_info(bp_readings)').all();
+  const photoRequired = info.find((c) => c.name === 'photo')?.notnull;
+  const hasAll = ['location', 'values_source', 'recorded_by'].every((n) => info.some((c) => c.name === n));
+  if (!photoRequired && hasAll) return;
+
+  // SQLite no permite quitar NOT NULL: se reconstruye la tabla conservando los datos.
+  const cols = info.map((c) => c.name).join(', ');
+  db.exec('PRAGMA foreign_keys = OFF');
+  tx(db, () => {
+    db.exec('ALTER TABLE bp_readings RENAME TO bp_readings_old');
+    db.exec(BP_TABLE);
+    db.exec(`INSERT INTO bp_readings (${cols}) SELECT ${cols} FROM bp_readings_old`);
+    db.exec(`UPDATE bp_readings SET location = 'casa', recorded_by = patient_id WHERE recorded_by IS NULL`);
+    db.exec('DROP TABLE bp_readings_old');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_bp_patient ON bp_readings(patient_id, taken_at)');
+  });
+  db.exec('PRAGMA foreign_keys = ON');
 }
 
 /** Ejecuta fn dentro de una transacción. */

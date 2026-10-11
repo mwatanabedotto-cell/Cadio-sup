@@ -15,6 +15,8 @@ App web móvil (instalable en el teléfono) para el seguimiento de la presión a
 - Ficha del paciente: fotos de las tomas (toque para ampliar), gráfico, promedios, laboratorios y citas.
 - Ve si los valores los escribió el paciente, los leyó la IA (🤖) o los corrigió él mismo; siempre puede comparar con la foto.
 - Puede corregir o completar los valores leídos de la foto, dejar un comentario y marcar como revisado.
+- 🩺 **Registra tomas él mismo** (p. ej. medidas en el consultorio, o informadas por teléfono): valores, lugar, brazo, hora, comentario y foto opcional. El paciente las ve en su historial y no puede borrarlas.
+- Compara el promedio en casa (14 días) con las últimas tomas de consultorio y avisa cuando el patrón sugiere **efecto de bata blanca** o **hipertensión enmascarada** (umbrales ESH: casa ≥135/85, consultorio ≥140/90). En el gráfico, las tomas de consultorio se marcan con un cuadrado.
 - 📅 Publica horarios (rango de días/horas y duración) y confirma, rechaza o cierra citas.
 
 La clasificación de colores (Normal / Elevada / HTA 1 / HTA 2 / Muy alta / Baja) sigue los umbrales ACC/AHA 2017 y es solo orientativa.

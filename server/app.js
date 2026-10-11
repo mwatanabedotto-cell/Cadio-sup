@@ -260,9 +260,9 @@ function createApp(config = {}) {
     const source = hasValues ? (b.values_source === 'ia' ? 'ia' : 'paciente') : null;
 
     const { lastInsertRowid } = db.prepare(`
-      INSERT INTO bp_readings (patient_id, photo, systolic, diastolic, pulse, arm, values_source, taken_at, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      req.user.id, req.file.filename, systolic, diastolic, pulse, arm, source, takenAt, text(b.notes));
+      INSERT INTO bp_readings (patient_id, photo, systolic, diastolic, pulse, arm, location, values_source, recorded_by, taken_at, notes)
+      VALUES (?, ?, ?, ?, ?, ?, 'casa', ?, ?, ?, ?)`).run(
+      req.user.id, req.file.filename, systolic, diastolic, pulse, arm, source, req.user.id, takenAt, text(b.notes));
     if (!hasValues) readInBackground(Number(lastInsertRowid), req.file.filename, req.file.mimetype);
     res.status(201);
     return db.prepare('SELECT * FROM bp_readings WHERE id = ?').get(lastInsertRowid);
@@ -271,6 +271,9 @@ function createApp(config = {}) {
   app.delete('/api/bp/:id', patient, h((req) => {
     const row = db.prepare('SELECT * FROM bp_readings WHERE id = ? AND patient_id = ?').get(idParam(req), req.user.id);
     if (!row) throw new HttpError(404, 'Toma no encontrada.');
+    if (row.recorded_by && row.recorded_by !== req.user.id) {
+      throw new HttpError(403, 'Esta toma la registró tu médico y no se puede borrar.');
+    }
     db.prepare('DELETE FROM bp_readings WHERE id = ?').run(row.id);
     removeFile(row.photo);
     return { ok: true };
@@ -375,6 +378,30 @@ function createApp(config = {}) {
       labs: db.prepare('SELECT * FROM labs WHERE patient_id = ? ORDER BY created_at DESC').all(p.id),
       appointments: db.prepare(`${apptSql} WHERE a.patient_id = ? ORDER BY s.starts_at DESC`).all(p.id),
     };
+  }));
+
+  // El médico registra una toma (p. ej. medida en el consultorio). La foto es opcional.
+  app.post('/api/doctor/patients/:id/bp', doctor, uploadPhoto, h((req, res) => {
+    const p = ownPatient(req, idParam(req));
+    const b = req.body || {};
+    const systolic = int(b.systolic, 50, 300, 'La sistólica');
+    const diastolic = int(b.diastolic, 30, 200, 'La diastólica');
+    if (systolic === null || diastolic === null) throw new HttpError(400, 'Escribe la sistólica y la diastólica.');
+    if (diastolic >= systolic) throw new HttpError(400, 'La diastólica debe ser menor que la sistólica.');
+    const now = new Date().toISOString();
+    const takenAt = isoDate(b.taken_at, 'La fecha de la toma') || now;
+    if (takenAt > new Date(Date.now() + 5 * 60e3).toISOString()) throw new HttpError(400, 'La fecha de la toma no puede ser futura.');
+
+    const { lastInsertRowid } = db.prepare(`
+      INSERT INTO bp_readings (patient_id, photo, systolic, diastolic, pulse, arm, location, values_source,
+                               recorded_by, taken_at, notes, doctor_comment, reviewed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'medico', ?, ?, ?, ?, ?)`).run(
+      p.id, req.file?.filename ?? null, systolic, diastolic, int(b.pulse, 20, 250, 'El pulso'),
+      ['izquierdo', 'derecho'].includes(b.arm) ? b.arm : null,
+      b.location === 'casa' ? 'casa' : 'consultorio',
+      req.user.id, takenAt, text(b.notes), text(b.doctor_comment, 1000), now);
+    res.status(201);
+    return db.prepare('SELECT * FROM bp_readings WHERE id = ?').get(lastInsertRowid);
   }));
 
   app.patch('/api/doctor/bp/:id', doctor, h((req) => {

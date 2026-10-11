@@ -67,7 +67,7 @@
     d.setHours(hour, 10 + (bpSeq % 4) * 7, 0, 0);
     const r = {
       id: ++bpSeq, patient_id, photo: addFile(svgUrl(monitorSvg(sys, dia, pul, (bpSeq % 5) - 2))),
-      systolic: sys, diastolic: dia, pulse: pul, arm: 'izquierdo', values_source: 'ia',
+      systolic: sys, diastolic: dia, pulse: pul, arm: 'izquierdo', values_source: 'ia', location: 'casa', recorded_by: patient_id,
       taken_at: iso(d.getTime()), notes: null, doctor_comment: null, reviewed_at: null, created_at: sqlDate(d.getTime()),
       ...extra,
     };
@@ -86,6 +86,17 @@
     if (i === 3) { r.doctor_comment = 'Vamos bien. Sigue con losartán 50 mg cada 12 h.'; r.values_source = 'paciente'; }
     if (i === 7) r.doctor_comment = 'Excelente evolución, mantén la caminata diaria.';
   });
+  // Tomas medidas en el consultorio (sin foto).
+  const office = (patient_id, daysAgo, sys, dia, pul, comment) => {
+    const d = new Date(now - daysAgo * 864e5); d.setHours(10, 30, 0, 0);
+    bp.push({ id: ++bpSeq, patient_id, photo: null, systolic: sys, diastolic: dia, pulse: pul, arm: 'derecho',
+      values_source: 'medico', location: 'consultorio', recorded_by: 1, taken_at: iso(d.getTime()), notes: null,
+      doctor_comment: comment, reviewed_at: iso(d.getTime()), created_at: sqlDate(d.getTime()) });
+  };
+  office(2, 12, 156, 98, 84, 'Medida en consulta. Ajustamos losartán y empezamos el control en casa.');
+  office(2, 1, 148, 92, 82, null);
+  office(3, 5, 172, 102, 90, 'Medida en consulta. Reforzar adherencia al tratamiento.');
+  office(4, 9, 146, 92, 78, 'En consulta sale alta; controlemos en casa dos veces al día.');
   // Jorge: una toma muy alta sin revisar.
   addBp(3, 3, 9, 162, 98, 88, { reviewed_at: iso(now - 2 * 864e5) });
   addBp(3, 1, 9, 168, 101, 90);
@@ -186,11 +197,14 @@
       need('patient');
       const sys = num(b.systolic), dia = num(b.diastolic);
       const r = { id: ++bpSeq, patient_id: me.id, photo: addFile(URL.createObjectURL(b.photo)), systolic: sys, diastolic: dia,
-        pulse: num(b.pulse), arm: b.arm || null, values_source: sys || dia ? (b.values_source === 'ia' ? 'ia' : 'paciente') : null,
+        pulse: num(b.pulse), arm: b.arm || null, location: 'casa', recorded_by: me.id, values_source: sys || dia ? (b.values_source === 'ia' ? 'ia' : 'paciente') : null,
         taken_at: b.taken_at || nowIso(), notes: b.notes || null, doctor_comment: null, reviewed_at: null, created_at: sqlDate(Date.now()) };
       bp.push(r); rollCam(); return r;
     }],
-    ['DELETE', /^\/api\/bp\/(\d+)$/, (_b, [id]) => { need('patient'); bp.splice(bp.findIndex((r) => r.id === Number(id) && r.patient_id === me.id), 1); return { ok: true }; }],
+    ['DELETE', /^\/api\/bp\/(\d+)$/, (_b, [id]) => {
+      need('patient');
+      if (bp.find((r) => r.id === Number(id))?.recorded_by !== me.id) throw new HttpError(403, 'Esta toma la registró tu médico y no se puede borrar.');
+      bp.splice(bp.findIndex((r) => r.id === Number(id) && r.patient_id === me.id), 1); return { ok: true }; }],
     ['GET', /^\/api\/labs$/, () => { need('patient'); return labs.filter((l) => l.patient_id === me.id).sort(byDateDesc('created_at')); }],
     ['POST', /^\/api\/labs$/, (b) => {
       need('patient');
@@ -232,6 +246,17 @@
       return { patient: p, bp: bp.filter((r) => r.patient_id === p.id).sort(byDateDesc('taken_at')),
         labs: labs.filter((l) => l.patient_id === p.id).sort(byDateDesc('created_at')),
         appointments: appointments.filter((a) => a.patient_id === p.id).map(apptView).sort(byDateDesc('starts_at')) };
+    }],
+    ['POST', /^\/api\/doctor\/patients\/(\d+)\/bp$/, (b, [id]) => {
+      need('doctor');
+      const sys = num(b.systolic), dia = num(b.diastolic);
+      if (!sys || !dia) throw new HttpError(400, 'Escribe la sistólica y la diastólica.');
+      if (dia >= sys) throw new HttpError(400, 'La diastólica debe ser menor que la sistólica.');
+      const r = { id: ++bpSeq, patient_id: Number(id), photo: b.photo ? addFile(URL.createObjectURL(b.photo)) : null,
+        systolic: sys, diastolic: dia, pulse: num(b.pulse), arm: b.arm || null, location: b.location === 'casa' ? 'casa' : 'consultorio',
+        values_source: 'medico', recorded_by: me.id, taken_at: b.taken_at || nowIso(), notes: null,
+        doctor_comment: b.doctor_comment || null, reviewed_at: nowIso(), created_at: sqlDate(Date.now()) };
+      bp.push(r); return r;
     }],
     ['PATCH', /^\/api\/doctor\/bp\/(\d+)$/, (b, [id]) => {
       need('doctor');
