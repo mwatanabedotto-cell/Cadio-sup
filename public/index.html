@@ -15,6 +15,7 @@
   <header class="topbar">
     <div class="brand"><img src="icon.svg" alt="" width="28" height="28"> Cadio-sup</div>
     <div class="top-actions">
+      <a id="msgs" class="bell" href="#/mensajes" hidden aria-label="Mensajes">💬<span id="msgs-count" class="bell-count" hidden></span></a>
       <a id="bell" class="bell" href="#/avisos" hidden aria-label="Avisos">🔔<span id="bell-count" class="bell-count" hidden></span></a>
       <button id="logout" class="link" hidden>Salir</button>
     </div>
@@ -23,7 +24,12 @@
   <nav id="tabs" class="tabs" hidden></nav>
   <div id="toast" class="toast" role="status" hidden></div>
   <dialog id="modal"></dialog>
+  <script src="i18n.js"></script>
   <script src="clinical.js"></script>
-  <script src="app.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/patient.js"></script>
+  <script src="js/staff.js"></script>
+  <script src="js/main.js"></script>
 </body>
 </html>

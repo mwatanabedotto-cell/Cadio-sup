@@ -1,7 +1,7 @@
 // Service worker mínimo: guarda la "cáscara" de la app para que abra rápido.
 // Los datos (API y archivos) siempre van a la red.
-const CACHE = 'cadio-shell-v3';
-const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/clinical.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'cadio-shell-v4';
+const SHELL = ['/', '/index.html', '/styles.css', '/i18n.js', '/clinical.js', '/js/core.js', '/js/components.js', '/js/patient.js', '/js/staff.js', '/js/main.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));

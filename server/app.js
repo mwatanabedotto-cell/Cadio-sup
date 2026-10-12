@@ -73,7 +73,7 @@ function createApp(config = {}) {
   app.use(express.json({ limit: '100kb' }));
   app.use(auth.loadUser(db));
   app.use((req, _res, next) => {
-    req.lang = I18n.normalizeLang(req.get('x-lang') || req.user?.lang || req.acceptsLanguages('pt', 'es') || 'es');
+    req.lang = I18n.normalizeLang(req.get('x-lang') || req.user?.lang || req.acceptsLanguages('es', 'pt') || 'es');
     next();
   });
 

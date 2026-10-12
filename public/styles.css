@@ -107,8 +107,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--primary); o
 .btn.ghost-danger { background: transparent; color: var(--danger); border: 1px solid var(--line); }
 .link { background: none; border: 0; color: var(--primary); font: inherit; cursor: pointer; padding: 4px; }
 
-.segmented { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 3px; margin-bottom: 14px; }
-.segmented button { flex: 1; min-width: 0; border: 0; background: none; font: inherit; font-size: .88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 9px 4px; border-radius: 9px; color: var(--muted); cursor: pointer; }
+.segmented { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 3px; margin-bottom: 14px; overflow-x: auto; scrollbar-width: none; }
+.segmented::-webkit-scrollbar { display: none; }
+.segmented button { flex: 1 0 auto; border: 0; background: none; font: inherit; font-size: .88rem; white-space: nowrap; padding: 9px 10px; border-radius: 9px; color: var(--muted); cursor: pointer; }
 .segmented button.active { background: var(--card); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
 
 .thumb {
@@ -237,3 +238,60 @@ dialog img.full { width: 100%; max-height: 75vh; object-fit: contain; background
 .dose-strip i { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); }
 .dose-strip i.taken { background: var(--ok); border-color: var(--ok); }
 .dose-strip i.skipped { background: var(--danger); border-color: var(--danger); border-radius: 2px; }
+
+/* ---------- idioma ---------- */
+.lang-switch { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); margin-bottom: 8px; }
+.lang-switch button { border: 0; background: none; font: inherit; font-size: .85rem; padding: 6px 12px; border-radius: 8px; color: var(--muted); cursor: pointer; }
+.lang-switch button.active { background: var(--card); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
+
+/* ---------- botones y avisos ---------- */
+.btn.danger { background: #b42318; }
+.btn.danger:hover { background: #8f1d12; }
+.alert.soft { background: color-mix(in srgb, var(--warn) 14%, var(--card)); color: var(--text); }
+.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badge.video { background: #dce8ff; color: #1d4aa0; }
+.video-btn { background: #2f6fdb; margin-top: 8px; }
+.video-btn:hover { background: #1d4aa0; }
+.tab-badge { position: absolute; margin-left: 2px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--primary); color: #fff; font-size: .65rem; font-style: normal; font-weight: 700; line-height: 16px; }
+.tabs a { position: relative; }
+
+/* ---------- síntomas y triaje ---------- */
+.symptoms-pick { border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.symptoms-pick legend { font-weight: 600; font-size: .9rem; margin-bottom: 6px; }
+.sym { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; font-size: .88rem; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; margin: 0; cursor: pointer; background: var(--bg); }
+.sym input { width: auto; margin-top: 2px; }
+.sym.none { grid-column: 1 / -1; }
+.sym:has(input:checked) { border-color: var(--info); background: color-mix(in srgb, var(--info) 10%, var(--card)); }
+.sym.red:has(input:checked) { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--card)); }
+.symptoms { font-size: .85rem; margin: 6px 0 0; color: var(--warn); }
+.symptoms.red { color: var(--danger); font-weight: 600; }
+.triage h2 { margin-top: 0; }
+.triage.emergency { border-top: 8px solid #b42318; }
+.triage.urgent { border-top: 8px solid var(--warn); }
+.triage.contact { border-top: 8px solid var(--info); }
+dialog.dlg-emergency { outline: 4px solid #b42318; }
+@media (max-width: 420px) { .symptoms-pick { grid-template-columns: 1fr; } }
+
+/* ---------- mensajes ---------- */
+.thread { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
+.msg { max-width: 82%; align-self: flex-start; background: var(--card); border: 1px solid var(--line); border-radius: 14px 14px 14px 4px; padding: 8px 12px; }
+.msg.mine { align-self: flex-end; background: color-mix(in srgb, var(--info) 14%, var(--card)); border-color: transparent; border-radius: 14px 14px 4px 14px; }
+.msg-from { font-size: .75rem; font-weight: 700; color: var(--info); }
+.msg-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-time { font-size: .7rem; color: var(--muted); text-align: right; }
+.msg-day { align-self: center; font-size: .75rem; color: var(--muted); margin: 8px 0 2px; }
+.composer { position: sticky; bottom: calc(64px + env(safe-area-inset-bottom)); display: flex; gap: 8px; align-items: flex-end; background: var(--bg); padding: 8px 0; }
+.composer textarea { min-height: 44px; }
+.thread-row.unread { border-color: var(--info); }
+
+/* ---------- datos y laboratorios ---------- */
+.measure-last { font-size: 1.2rem; margin-top: 2px; }
+.lab-group { margin: 16px 0 6px; font-size: .9rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.lab-last { text-align: right; font-variant-numeric: tabular-nums; }
+.lab-last b { font-size: 1.25rem; }
+.lab-last.high b, .lab-last.low b { color: var(--danger); }
+.lab-edit summary { cursor: pointer; font-size: .85rem; color: var(--info); margin-top: 6px; }
+.lab-row { gap: 8px; margin-top: 6px; }
+.lab-row input { width: 110px; padding: 7px 9px; }
+.staff-code { font-size: 1.3rem; letter-spacing: .12em; padding: 8px 12px; background: var(--bg); border-radius: 8px; border: 1px dashed var(--line); }
+.doctor-row select { padding: 7px 9px; }
