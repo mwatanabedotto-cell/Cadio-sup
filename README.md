@@ -1,6 +1,6 @@
 # Cadio-sup
 
-App web móvil (instalable en el teléfono) para el seguimiento de la presión arterial a distancia:
+App web móvil (instalable en el teléfono) para el seguimiento de la presión arterial a distancia, en **español y portugués de Brasil**, para consultorios con uno o varios médicos y secretaria:
 
 **Paciente**
 - 📷 Toma la foto del tensiómetro **directamente desde la app** (cámara integrada con guía de encuadre; si el navegador no lo permite, abre la cámara nativa del teléfono o la galería).
@@ -13,6 +13,11 @@ App web móvil (instalable en el teléfono) para el seguimiento de la presión a
 - 📋 Sigue el protocolo de automedición (AMPA) que le indica el médico, con recordatorios y avance día por día.
 - 💊 Ve sus remedios del día y marca "Tomé / No"; recibe un recordatorio a cada hora.
 - 🔔 Recibe avisos: recordatorios, comentarios del médico, citas confirmadas. Descarga su informe en PDF.
+- 🚨 **Síntomas al enviar la toma**: marca lo que siente (dolor de pecho, falta de aire, debilidad de un lado…) y, si hay signos de alarma o presión muy alta con síntomas, la app le indica **ir a urgencias ya** con un botón para llamar a emergencias; su médico recibe el aviso al instante.
+- 💬 **Mensajes** con su médico (no para emergencias).
+- 📈 **Datos**: peso (con IMC), glucosa capilar (en ayunas, posprandial…), cintura y saturación, con gráficos; consejos inmediatos ante hipoglucemia o saturación baja.
+- 🧪 Sus laboratorios se **leen con IA** y ve la **evolución de cada valor** (LDL, creatinina, potasio, HbA1c…) con su rango de referencia.
+- 🎥 Elige **cita presencial o teleconsulta**; a la hora de la cita entra a la videollamada desde la app.
 
 **Médico**
 - 👥 Lista de pacientes ordenada por lo que falta revisar, con la última toma y alertas de color.
@@ -26,7 +31,11 @@ App web móvil (instalable en el teléfono) para el seguimiento de la presión a
 - 🎯 **Meta por paciente** (p. ej. <130/80): colores, alertas y "% en meta" usan la meta individual.
 - 📋 **Protocolo AMPA**: indica N días (3–14) con 2 tomas en la mañana y 2 en la noche; el paciente recibe recordatorios; el día 1 no cuenta; al terminar llega el promedio con la interpretación según el umbral domiciliario ESH (135/85).
 - 💊 **Medicación y adherencia**: indica fármaco, dosis, horarios e indicaciones; ve la adherencia de 14 días y un registro de los últimos 7 días por dosis.
+- 💬 Mensajes con cada paciente; 🧪 corrige o carga valores de laboratorio y vuelve a leer un informe con IA.
+- 👥 **Consultorio con varios médicos**: "mis pacientes" o "todo el consultorio", cambio de médico de cabecera sin perder el historial, código de equipo para sumar médicos y secretarias.
 - 📄 **Informe PDF** del paciente: promedios (casa 7/30 días, consultorio), % en meta, tomas en alerta, gráfico, resultado AMPA, medicación con adherencia, tabla de tomas y laboratorios.
+
+**Secretaria** (rol administrativo): ve la lista de pacientes y sus datos de contacto, registra presión y peso en el consultorio (si la toma es de alarma avisa al médico), gestiona la agenda de todos los médicos (abre horarios, confirma, cambia a teleconsulta) y reasigna el médico de cabecera. **No** ve comentarios clínicos, laboratorios, medicación ni mensajes.
 
 La clasificación de colores (Normal / Elevada / HTA 1 / HTA 2 / Muy alta / Baja) sigue los umbrales ACC/AHA 2017 y es solo orientativa.
 
@@ -42,10 +51,10 @@ DOCTOR_CODE=un-codigo-secreto npm start
 # abre http://localhost:3000
 ```
 
-1. El médico se registra eligiendo **"Soy médico"** e ingresando el `DOCTOR_CODE`.
-2. Comparte la dirección de la app con sus pacientes (botón "Compartir enlace" en Perfil).
-3. Cada paciente se registra y elige a su médico de la lista.
-4. En **Agenda**, el médico abre horarios para que los pacientes puedan reservar.
+1. El primer médico se registra con **"Nuevo consultorio"**: nombre del consultorio y el `DOCTOR_CODE`.
+2. En **Perfil → Equipo** ve el **código de equipo**; otros médicos y la secretaria se registran con **"Soy del equipo"** y ese código.
+3. Comparte la dirección de la app con los pacientes; cada uno se registra y elige a su médico.
+4. En **Agenda** se abren horarios para que los pacientes reserven (presencial o teleconsulta).
 
 En el teléfono, usa "Agregar a la pantalla de inicio" para instalarla como app.
 
@@ -65,6 +74,10 @@ En el teléfono, usa "Agregar a la pantalla de inicio" para instalarla como app.
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | Claves para push. Si no se definen, se generan una vez y se guardan en `DATA_DIR/vapid.json`. |
 | `VAPID_SUBJECT`  | Contacto para los servicios push, p. ej. `mailto:tu@correo.com`.              |
 | `ALERT_WEBHOOK_URL` | URL que recibe un POST JSON con cada alerta de presión (para reenviarla por WhatsApp, SMS o correo con n8n, Make, Zapier, Twilio…). |
+| `LAB_READ`       | `false` para no leer laboratorios con IA aunque esté activa la lectura de fotos. |
+| `TELE_BASE_URL`  | Servidor de videollamadas (por defecto `https://meet.jit.si/`). Ver "Teleconsulta". |
+| `EMERGENCY_NUMBER` | Número de emergencias que muestra la app. Si no se define: 192 (SAMU) en portugués y 911 en español. |
+| `HOME_BP_THRESHOLD` | Umbral de presión domiciliaria para el AMPA/MRPA y la comparación casa-consultorio, p. ej. `130/80` (Diretriz Brasileira 2020) o `135/85` (ESH, por defecto). |
 | `DEFAULT_TZ`     | Zona horaria si el teléfono del paciente aún no la informó (p. ej. `America/Sao_Paulo`). |
 
 ## Avisos y recordatorios
@@ -91,6 +104,34 @@ Protecciones: el servidor descarta lecturas fuera de rango fisiológico o incohe
 
 **Privacidad:** las fotos se envían a la API de Anthropic para leerlas (solo la imagen, sin nombre ni datos del paciente). Inclúyelo en el consentimiento informado y revisa las condiciones de tratamiento de datos de Anthropic para datos de salud de tu país.
 
+## Síntomas y urgencias
+
+Al enviar una toma el paciente marca sus síntomas. El triaje (en `public/clinical.js`) es orientativo y conservador:
+
+| Situación | Qué ve el paciente | Aviso al médico |
+|---|---|---|
+| Síntoma de alarma (dolor de pecho, falta de aire, debilidad o cara caída de un lado, dificultad para hablar, confusión, pérdida de visión, desmayo) | **Acude a urgencias ahora** + botón para llamar a emergencias | Inmediato (push y webhook) |
+| PA >180/120 con cualquier síntoma | Igual: posible emergencia hipertensiva | Inmediato |
+| PA >180/120 sin síntomas | Reposar 5 min, repetir y contactar hoy al médico; signos por los que ir a urgencias | Inmediato |
+| PA baja con mareo | Acostarse, hidratarse, repetir y contactar hoy | Inmediato |
+| Síntomas leves o PA baja sin síntomas | El médico verá la toma; signos de alarma | En la ficha |
+
+## Mensajes, mediciones y laboratorios
+
+- **Mensajes:** un hilo por paciente con los médicos de su consultorio, con contador de no leídos y aviso push. La app recuerda que no son para emergencias.
+- **Mediciones:** peso, glucosa capilar (en ayunas, antes de comer, 2 h después, antes de dormir), cintura y SpO₂. Glucosa <54 o >300 mg/dL y SpO₂ <92% avisan al médico; ante hipoglucemia el paciente ve la regla 15-15.
+- **Laboratorios con IA:** al subir la foto o el PDF, Claude extrae los analitos del catálogo (lípidos, glucosa y HbA1c, creatinina, TFG, urea, albuminuria, ácido úrico, sodio, potasio, hemoglobina, TSH, ALT, AST), los convierte a la unidad habitual y guarda la fecha del examen. El servidor descarta valores imposibles. El médico recibe un aviso con los valores fuera de rango y puede corregir, borrar o cargar valores a mano (lo corregido no se sobrescribe al volver a leer). Paciente y médico ven la evolución de cada analito con su banda de referencia.
+
+## Teleconsulta
+
+El paciente elige "Teleconsulta" al reservar; el médico o la secretaria también pueden cambiar la modalidad. Al confirmar se crea una sala con nombre imposible de adivinar y ambos ven el botón **Entrar a la videollamada** desde 15 minutos antes; una hora antes reciben un recordatorio.
+
+Por defecto se usa el servicio público y gratuito de **Jitsi Meet** (no requiere cuentas). Para uso clínico real conviene un servidor propio de Jitsi o un servicio con acuerdo de tratamiento de datos (p. ej. Jitsi as a Service) y configurarlo en `TELE_BASE_URL`.
+
+## Idiomas
+
+Español y portugués de Brasil: el idioma se detecta del teléfono, se cambia en el inicio de sesión o en Perfil y se guarda por usuario. Se traducen la app, los mensajes de error, los avisos y recordatorios (en el idioma de quien los recibe), el informe PDF y la nota de la lectura por IA. En portugués se usan los términos locales (MRPA, glicemia, pronto-socorro, SAMU 192). Los textos están en `public/i18n.js` (el español es la clave); una prueba verifica que no falte ninguna traducción.
+
 ## Publicación en internet
 
 - **HTTPS es obligatorio**: los navegadores solo permiten usar la cámara dentro de la app en sitios `https://` (o `localhost`).
@@ -100,7 +141,7 @@ Protecciones: el servidor descarta lecturas fuera de rango fisiológico o incohe
 ## Seguridad y privacidad
 
 - Contraseñas con `scrypt`; sesiones en cookie `HttpOnly` de 30 días.
-- Las fotos y PDF **no son públicos**: solo los puede ver el propio paciente y su médico.
+- Las fotos y PDF **no son públicos**: las fotos de las tomas las ven el paciente y el equipo de su consultorio; los laboratorios, solo el paciente y los médicos de su consultorio.
 - Solo se aceptan imágenes (JPEG, PNG, WebP, HEIC) y PDF de hasta 15 MB; las fotos se comprimen en el teléfono antes de enviarse.
 - Son datos de salud: antes de usarla con pacientes reales revisa la normativa de tu país (p. ej. LGPD en Brasil, leyes de protección de datos personales/sanitarios), el consentimiento informado y dónde se alojan los datos.
 - La app **no sustituye la atención de urgencias** y lo indica a los pacientes cuando una toma sale fuera de rango.
@@ -108,8 +149,8 @@ Protecciones: el servidor descarta lecturas fuera de rango fisiológico o incohe
 ## Demo sin servidor
 
 `node demo/build.js salida.html` genera una página HTML autocontenida con la app, datos de ejemplo
-(una médica y tres pacientes), un servidor simulado en el navegador y una cámara que muestra un tensiómetro
-dibujado. Sirve para mostrar la app sin instalar nada; los datos se pierden al recargar.
+(un consultorio con dos médicos, una secretaria y tres pacientes), un servidor simulado en el navegador y una
+cámara que muestra un tensiómetro dibujado. Sirve para mostrar la app sin instalar nada; los datos se pierden al recargar.
 
 ## Desarrollo
 
@@ -121,8 +162,18 @@ npm test      # pruebas de la API
 Estructura:
 
 ```
-server/   API Express + SQLite (app.js, db.js, auth.js, reader.js, notify.js, scheduler.js, report.js, index.js)
-public/clinical.js  Lógica clínica compartida por servidor y app (metas, AMPA, adherencia)
-public/   Frontend (HTML/CSS/JS sin framework), PWA con service worker
+server/            API Express + SQLite
+  app.js           configuración, roles y manejo de errores traducidos
+  routes/          auth, notifications, readings, clinical, measurements, labs, appointments, messages, clinic, files
+  reader.js        lectura de la foto del tensiómetro (Claude)
+  lab-reader.js    lectura de informes de laboratorio (Claude)
+  notify.js        avisos en la app, push y webhook
+  scheduler.js     recordatorios (AMPA, remedios, citas) y fin de AMPA
+  report.js        informe PDF
+public/            Frontend sin framework, PWA con service worker
+  i18n.js          traducciones (es → pt)
+  clinical.js      lógica clínica compartida: clasificación, triaje, AMPA, adherencia, mediciones, analitos
+  js/              core, components, patient, staff, main
+demo/              servidor simulado y generador de la demo
 test/     Pruebas con node:test
 ```

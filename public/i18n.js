@@ -226,6 +226,7 @@
     "En iPhone, agrega la app a la pantalla de inicio (Compartir → Agregar a inicio) y ábrela desde ahí para activar las notificaciones.": "No iPhone, adicione o app à tela de início (Compartilhar → Adicionar à Tela de Início) e abra por lá para ativar as notificações.",
     "En iPhone, primero agrega la app a la pantalla de inicio (Compartir → Agregar a inicio) y ábrela desde ese ícono.": "No iPhone, primeiro adicione o app à tela de início (Compartilhar → Adicionar à Tela de Início) e abra por esse ícone.",
     "En meta": "Na meta",
+    "En la demo no se genera el PDF. En la app real se abre el informe con promedios, gráfico, AMPA, remedios, tomas y laboratorios.": "Na demonstração o PDF não é gerado. No app real abre o relatório com médias, gráfico, MRPA, remédios, medidas e exames.",
     "En meta 14 días": "Na meta 14 dias",
     "En otro momento": "Em outro momento",
     "Encuadra la hoja de resultados completa": "Enquadre a folha de resultados inteira",
