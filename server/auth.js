@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { HttpError } = require('./http');
 
 const SESSION_DAYS = 30;
 const COOKIE = 'cadio_session';
@@ -51,8 +52,8 @@ function destroySession(db, req, res) {
 /** Middleware: carga req.user si hay una sesión válida. */
 function loadUser(db) {
   const findSession = db.prepare(`
-    SELECT u.id, u.name, u.email, u.phone, u.role, u.doctor_id, u.birth_date,
-           u.bp_target_sys, u.bp_target_dia, u.timezone
+    SELECT u.id, u.name, u.email, u.phone, u.role, u.clinic_id, u.doctor_id, u.birth_date, u.height_cm,
+           u.bp_target_sys, u.bp_target_dia, u.timezone, u.lang
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ?`);
   return (req, _res, next) => {
@@ -62,15 +63,15 @@ function loadUser(db) {
   };
 }
 
-function requireUser(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión.' });
+function requireUser(req, _res, next) {
+  if (!req.user) return next(new HttpError(401, 'Debes iniciar sesión.'));
   next();
 }
 
 function requireRole(role) {
-  return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión.' });
-    if (req.user.role !== role) return res.status(403).json({ error: 'No tienes permiso para esta acción.' });
+  return (req, _res, next) => {
+    if (!req.user) return next(new HttpError(401, 'Debes iniciar sesión.'));
+    if (req.user.role !== role) return next(new HttpError(403, 'No tienes permiso para esta acción.'));
     next();
   };
 }

@@ -63,7 +63,7 @@
    * Resume un protocolo AMPA: N días, 2 tomas en la mañana y 2 en la noche.
    * El primer día no cuenta para el promedio (recomendación ESH).
    */
-  function protocolSummary(protocol, readings, now = new Date()) {
+  function protocolSummary(protocol, readings, now = new Date(), homeHigh = HOME_HIGH) {
     const tz = protocol.tz;
     const today = localParts(now, tz).date;
     const end = addDays(protocol.start_date, protocol.days - 1);
@@ -91,7 +91,8 @@
       expected,
       completeness: expected ? Math.min(100, Math.round((counted.length / expected) * 100)) : 0,
       avg,
-      high: avg ? avg.sys >= HOME_HIGH.sys || avg.dia >= HOME_HIGH.dia : null,
+      high: avg ? avg.sys >= homeHigh.sys || avg.dia >= homeHigh.dia : null,
+      threshold: homeHigh,
       // Con menos de 12 tomas válidas el promedio es poco fiable.
       enough: counted.length >= 12,
     };
@@ -143,7 +144,133 @@
     return [...new Set(list)].sort();
   }
 
-  const Clinical = { HOME_HIGH, classifyBP, targetOf, validTz, localParts, addDays, protocolSummary, expectedDoses, adherence, createdLocal, parseTimes };
+  /** "135/85" -> { sys: 135, dia: 85 } (para configurar el umbral domiciliario). */
+  function parseThreshold(value, fallback = HOME_HIGH) {
+    const m = String(value || '').match(/^(\d{2,3})\s*\/\s*(\d{2,3})$/);
+    return m ? { sys: Number(m[1]), dia: Number(m[2]) } : fallback;
+  }
+
+  // ---------- síntomas al enviar la toma ----------
+
+  // red: síntoma de alarma por sí solo (posible ACV, infarto, emergencia hipertensiva).
+  const SYMPTOMS = [
+    { code: 'chest_pain', label: 'Dolor o presión en el pecho', red: true },
+    { code: 'dyspnea', label: 'Falta de aire', red: true },
+    { code: 'weakness', label: 'Debilidad, hormigueo o cara caída de un lado', red: true },
+    { code: 'speech', label: 'Dificultad para hablar o entender', red: true },
+    { code: 'confusion', label: 'Confusión o somnolencia extraña', red: true },
+    { code: 'vision', label: 'Visión borrosa o pérdida de la visión', red: true },
+    { code: 'faint', label: 'Desmayo o casi desmayo', red: true },
+    { code: 'headache', label: 'Dolor de cabeza intenso', red: false },
+    { code: 'dizziness', label: 'Mareo', red: false },
+    { code: 'palpitations', label: 'Palpitaciones', red: false },
+    { code: 'nausea', label: 'Náuseas o vómitos', red: false },
+    { code: 'nosebleed', label: 'Sangrado de nariz que no para', red: false },
+  ];
+  const SYMPTOM_CODES = new Set(SYMPTOMS.map((x) => x.code));
+
+  /**
+   * Triaje orientativo al enviar una toma:
+   * - emergency: síntoma de alarma, o PA >180/120 con cualquier síntoma → urgencias ahora.
+   * - urgent: PA >180/120 sin síntomas, o PA baja con mareo → repetir y contactar hoy.
+   * - contact: PA baja sin síntomas o síntomas leves → avisar al médico.
+   * - ok: sin síntomas y sin valores de alerta.
+   */
+  function triage(s, d, symptoms = []) {
+    const list = (symptoms || []).filter((c) => SYMPTOM_CODES.has(c));
+    const red = list.some((c) => SYMPTOMS.find((x) => x.code === c).red);
+    const veryHigh = s && d ? s > 180 || d > 120 : false; // mismo umbral que classifyBP (ACC/AHA)
+    const low = s && d ? s < 90 || d < 60 : false;
+    if (red) return { level: 'emergency', reason: 'red_flag' };
+    if (veryHigh && list.length) return { level: 'emergency', reason: 'high_with_symptoms' };
+    if (veryHigh) return { level: 'urgent', reason: 'very_high' };
+    if (low && list.includes('dizziness')) return { level: 'urgent', reason: 'low_with_symptoms' };
+    if (low) return { level: 'contact', reason: 'low' };
+    if (list.length) return { level: 'contact', reason: 'symptoms' };
+    return { level: 'ok', reason: null };
+  }
+
+  // ---------- otras mediciones ----------
+
+  const MEASURES = {
+    weight: { label: 'Peso', unit: 'kg', min: 20, max: 350, step: 0.1 },
+    glucose: { label: 'Glucosa capilar', unit: 'mg/dL', min: 20, max: 600, step: 1, contexts: ['fasting', 'pre_meal', 'post_meal', 'bedtime', 'random'] },
+    waist: { label: 'Cintura', unit: 'cm', min: 40, max: 250, step: 0.5 },
+    spo2: { label: 'Saturación de oxígeno', unit: '%', min: 50, max: 100, step: 1 },
+  };
+  const GLUCOSE_CONTEXTS = { fasting: 'En ayunas', pre_meal: 'Antes de comer', post_meal: '2 h después de comer', bedtime: 'Antes de dormir', random: 'En otro momento' };
+
+  /** Clasificación orientativa (ADA para glucosa capilar). urgent = avisar al médico. */
+  function classifyMeasure(type, value, context) {
+    if (value === null || value === undefined) return { cls: '', label: '' };
+    if (type === 'glucose') {
+      if (value < 54) return { cls: 'crisis', label: 'Hipoglucemia grave', urgent: true, hypo: true };
+      if (value < 70) return { cls: 'low', label: 'Hipoglucemia', alert: true, hypo: true };
+      if (value > 300) return { cls: 'crisis', label: 'Muy alta', urgent: true };
+      const fasting = context === 'fasting' || context === 'pre_meal';
+      if (fasting) {
+        if (value < 100) return { cls: 'ok', label: 'Normal' };
+        if (value < 126) return { cls: 'elev', label: 'Elevada' };
+        return { cls: 'h2', label: 'Alta', alert: true };
+      }
+      if (value < 140) return { cls: 'ok', label: 'Normal' };
+      if (value < 200) return { cls: 'elev', label: 'Elevada' };
+      return { cls: 'h2', label: 'Alta', alert: true };
+    }
+    if (type === 'spo2') {
+      if (value < 90) return { cls: 'crisis', label: 'Muy baja', urgent: true };
+      if (value < 92) return { cls: 'low', label: 'Baja', urgent: true };
+      if (value < 95) return { cls: 'elev', label: 'Algo baja' };
+      return { cls: 'ok', label: 'Normal' };
+    }
+    return { cls: '', label: '' };
+  }
+
+  function bmi(weightKg, heightCm) {
+    if (!weightKg || !heightCm) return null;
+    const v = weightKg / ((heightCm / 100) ** 2);
+    const value = Math.round(v * 10) / 10;
+    const label = v < 18.5 ? 'Bajo peso' : v < 25 ? 'Normal' : v < 30 ? 'Sobrepeso' : v < 35 ? 'Obesidad I' : v < 40 ? 'Obesidad II' : 'Obesidad III';
+    const cls = v < 18.5 ? 'low' : v < 25 ? 'ok' : v < 30 ? 'elev' : v < 35 ? 'h1' : 'h2';
+    return { value, label, cls };
+  }
+
+  // ---------- laboratorios ----------
+
+  // Analitos que se grafican. Unidad canónica, rango plausible (para descartar lecturas erróneas)
+  // y referencia orientativa de adultos cuando el informe no trae la suya.
+  const ANALYTES = {
+    chol_total: { label: 'Colesterol total', unit: 'mg/dL', min: 40, max: 1500, refHigh: 200, group: 'Lípidos' },
+    ldl: { label: 'Colesterol LDL', unit: 'mg/dL', min: 5, max: 1000, refHigh: 130, group: 'Lípidos' },
+    hdl: { label: 'Colesterol HDL', unit: 'mg/dL', min: 5, max: 250, refLow: 40, group: 'Lípidos' },
+    trig: { label: 'Triglicéridos', unit: 'mg/dL', min: 10, max: 10000, refHigh: 150, group: 'Lípidos' },
+    glucose: { label: 'Glucosa en ayunas', unit: 'mg/dL', min: 20, max: 1500, refLow: 70, refHigh: 99, group: 'Glucosa' },
+    hba1c: { label: 'Hemoglobina glicosilada (HbA1c)', unit: '%', min: 3, max: 20, refHigh: 5.6, group: 'Glucosa' },
+    creatinine: { label: 'Creatinina', unit: 'mg/dL', min: 0.1, max: 25, refLow: 0.6, refHigh: 1.2, group: 'Riñón' },
+    egfr: { label: 'Filtrado glomerular (TFG)', unit: 'mL/min/1.73m²', min: 1, max: 200, refLow: 60, group: 'Riñón' },
+    urea: { label: 'Urea', unit: 'mg/dL', min: 2, max: 500, refLow: 15, refHigh: 45, group: 'Riñón' },
+    uacr: { label: 'Albúmina/creatinina en orina', unit: 'mg/g', min: 0, max: 10000, refHigh: 30, group: 'Riñón' },
+    uric_acid: { label: 'Ácido úrico', unit: 'mg/dL', min: 0.5, max: 25, refHigh: 7, group: 'Riñón' },
+    sodium: { label: 'Sodio', unit: 'mEq/L', min: 100, max: 190, refLow: 135, refHigh: 145, group: 'Electrolitos' },
+    potassium: { label: 'Potasio', unit: 'mEq/L', min: 1.5, max: 10, refLow: 3.5, refHigh: 5.0, group: 'Electrolitos' },
+    hemoglobin: { label: 'Hemoglobina', unit: 'g/dL', min: 2, max: 25, refLow: 12, refHigh: 17, group: 'Sangre' },
+    tsh: { label: 'TSH', unit: 'µUI/mL', min: 0.001, max: 200, refLow: 0.4, refHigh: 4.5, group: 'Tiroides' },
+    alt: { label: 'ALT (TGP)', unit: 'U/L', min: 1, max: 10000, refHigh: 40, group: 'Hígado' },
+    ast: { label: 'AST (TGO)', unit: 'U/L', min: 1, max: 10000, refHigh: 40, group: 'Hígado' },
+  };
+
+  /** Valor fuera del rango de referencia (el del informe si existe; si no, el orientativo). */
+  function labFlag(r) {
+    const a = ANALYTES[r.analyte] || {};
+    const lo = r.ref_low ?? a.refLow ?? null;
+    const hi = r.ref_high ?? a.refHigh ?? null;
+    if (hi !== null && r.value > hi) return 'high';
+    if (lo !== null && r.value < lo) return 'low';
+    return 'ok';
+  }
+
+  const Clinical = { HOME_HIGH, classifyBP, targetOf, validTz, localParts, addDays, protocolSummary, expectedDoses, adherence, createdLocal, parseTimes,
+    parseThreshold, SYMPTOMS, triage, MEASURES, GLUCOSE_CONTEXTS, classifyMeasure, bmi, ANALYTES, labFlag };
   if (typeof module !== 'undefined' && module.exports) module.exports = Clinical;
   else root.Clinical = Clinical;
 })(typeof window !== 'undefined' ? window : globalThis);

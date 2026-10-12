@@ -3,6 +3,7 @@
 const path = require('node:path');
 const { createApp } = require('./app');
 const { createReader } = require('./reader');
+const { createLabReader } = require('./lab-reader');
 const { createWebPush } = require('./notify');
 
 const port = Number(process.env.PORT) || 3000;
@@ -17,7 +18,8 @@ if (!doctorCode) {
 // si las credenciales vienen de otra fuente). AUTO_READ=false la desactiva.
 const autoRead = process.env.AUTO_READ ? process.env.AUTO_READ === 'true' : Boolean(process.env.ANTHROPIC_API_KEY);
 const reader = autoRead ? createReader({ model: process.env.CLAUDE_MODEL }) : null;
-console.log(`Lectura automática de fotos: ${reader ? 'activada' : 'desactivada'}`);
+const labReader = autoRead && process.env.LAB_READ !== 'false' ? createLabReader({ model: process.env.CLAUDE_MODEL }) : null;
+console.log(`Lectura automática de fotos: ${reader ? 'activada' : 'desactivada'}; de laboratorios: ${labReader ? 'activada' : 'desactivada'}`);
 
 // Notificaciones push al teléfono. Las claves VAPID se generan una vez en DATA_DIR/vapid.json
 // si no se definen VAPID_PUBLIC_KEY y VAPID_PRIVATE_KEY. PUSH=false las desactiva.
@@ -32,6 +34,10 @@ if (process.env.ALERT_WEBHOOK_URL) console.log('Alertas también por webhook: ac
 
 const app = createApp({
   reader,
+  labReader,
+  teleBaseUrl: process.env.TELE_BASE_URL,
+  emergencyNumber: process.env.EMERGENCY_NUMBER,
+  homeThreshold: process.env.HOME_BP_THRESHOLD,
   push,
   dataDir,
   doctorCode,

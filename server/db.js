@@ -19,29 +19,44 @@ CREATE TABLE IF NOT EXISTS bp_readings (
   recorded_by    INTEGER REFERENCES users(id),
   taken_at       TEXT NOT NULL,
   notes          TEXT,
+  symptoms       TEXT,            -- JSON: códigos de síntomas al momento de la toma
   doctor_comment TEXT,
   reviewed_at    TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);`;
+
+// Usuarios: pacientes, médicos y secretarias. Los dos últimos pertenecen a un consultorio.
+const USERS_TABLE = (name = 'users') => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  phone         TEXT,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL CHECK (role IN ('patient', 'doctor', 'assistant')),
+  clinic_id     INTEGER REFERENCES clinics(id),
+  doctor_id     INTEGER REFERENCES users(id),   -- médico de cabecera del paciente
+  birth_date    TEXT,
+  height_cm     REAL,
+  bp_target_sys INTEGER,          -- meta individual fijada por el médico
+  bp_target_dia INTEGER,
+  timezone      TEXT,             -- zona horaria del teléfono (IANA)
+  lang          TEXT,             -- 'es' | 'pt'
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );`;
 
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
-CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  name          TEXT NOT NULL,
-  email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  phone         TEXT,
-  password_hash TEXT NOT NULL,
-  role          TEXT NOT NULL CHECK (role IN ('patient', 'doctor')),
-  doctor_id     INTEGER REFERENCES users(id),
-  birth_date    TEXT,
-  bp_target_sys INTEGER,          -- meta individual fijada por el médico
-  bp_target_dia INTEGER,
-  timezone      TEXT,             -- zona horaria del teléfono (IANA)
-  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+CREATE TABLE IF NOT EXISTS clinics (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  staff_code TEXT NOT NULL UNIQUE,   -- código para que médicos y secretarias se unan
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+${USERS_TABLE()}
 
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT PRIMARY KEY,
@@ -147,6 +162,49 @@ CREATE TABLE IF NOT EXISTS med_logs (
   UNIQUE (medication_id, date, time)
 );
 
+-- Mensajes entre el paciente y los médicos del consultorio (un hilo por paciente).
+CREATE TABLE IF NOT EXISTS messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  patient_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sender_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body        TEXT NOT NULL,
+  read_at     TEXT,               -- cuando lo leyó la otra parte
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_patient ON messages(patient_id, id);
+
+-- Valores de laboratorio (leídos por IA de los informes o cargados por el médico).
+CREATE TABLE IF NOT EXISTS lab_results (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  lab_id      INTEGER REFERENCES labs(id) ON DELETE CASCADE,
+  patient_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  analyte     TEXT NOT NULL,
+  label       TEXT,               -- nombre tal como aparece en el informe
+  value       REAL NOT NULL,
+  unit        TEXT,
+  ref_low     REAL,
+  ref_high    REAL,
+  taken_date  TEXT NOT NULL,      -- YYYY-MM-DD
+  source      TEXT NOT NULL,      -- 'ia' | 'medico'
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_labres_patient ON lab_results(patient_id, analyte, taken_date);
+
+-- Peso, glucosa capilar, cintura, saturación…
+CREATE TABLE IF NOT EXISTS measurements (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  patient_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type        TEXT NOT NULL,
+  value       REAL NOT NULL,
+  context     TEXT,
+  taken_at    TEXT NOT NULL,
+  notes       TEXT,
+  recorded_by INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_meas_patient ON measurements(patient_id, type, taken_at);
+
 -- Recordatorios ya enviados (para no repetirlos).
 CREATE TABLE IF NOT EXISTS reminders_sent (
   key     TEXT PRIMARY KEY,
@@ -167,15 +225,48 @@ function openDb(dataDir) {
 }
 
 /** Cambios de esquema para bases de datos creadas con versiones anteriores. */
-function migrate(db) {
-  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
-  for (const [col, type] of [['bp_target_sys', 'INTEGER'], ['bp_target_dia', 'INTEGER'], ['timezone', 'TEXT']]) {
-    if (!userCols.includes(col)) db.exec(`ALTER TABLE users ADD COLUMN ${col} ${type}`);
-  }
+const addColumns = (db, table, cols) => {
+  const have = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  for (const [col, def] of cols) if (!have.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+};
 
+const randomCode = () => require('node:crypto').randomBytes(5).toString('hex').toUpperCase();
+
+function migrate(db) {
+  migrateUsers(db);
+  addColumns(db, 'appointments', [['modality', "TEXT NOT NULL DEFAULT 'presencial'"], ['video_room', 'TEXT'], ['reminded', 'INTEGER NOT NULL DEFAULT 0']]);
+  addColumns(db, 'labs', [['read_status', 'TEXT'], ['read_note', 'TEXT']]);
+  migrateReadings(db);
+
+  // Cada médico sin consultorio recibe uno propio; sus pacientes pasan a ese consultorio.
+  const orphans = db.prepare("SELECT id, name FROM users WHERE role = 'doctor' AND clinic_id IS NULL").all();
+  for (const d of orphans) {
+    const { lastInsertRowid } = db.prepare('INSERT INTO clinics (name, staff_code) VALUES (?, ?)').run(`Consultorio ${d.name}`, randomCode());
+    db.prepare('UPDATE users SET clinic_id = ? WHERE id = ?').run(lastInsertRowid, d.id);
+  }
+  db.exec(`UPDATE users SET clinic_id = (SELECT d.clinic_id FROM users d WHERE d.id = users.doctor_id)
+           WHERE role = 'patient' AND clinic_id IS NULL AND doctor_id IS NOT NULL`);
+}
+
+/** La tabla users de versiones anteriores no admitía el rol "assistant": se reconstruye. */
+function migrateUsers(db) {
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()?.sql || '';
+  if (sql.includes("'assistant'")) return;
+  const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name).join(', ');
+  db.exec('PRAGMA foreign_keys = OFF');
+  tx(db, () => {
+    db.exec(USERS_TABLE('users_new'));
+    db.exec(`INSERT INTO users_new (${cols}) SELECT ${cols} FROM users`);
+    db.exec('DROP TABLE users');
+    db.exec('ALTER TABLE users_new RENAME TO users');
+  });
+  db.exec('PRAGMA foreign_keys = ON');
+}
+
+function migrateReadings(db) {
   const info = db.prepare('PRAGMA table_info(bp_readings)').all();
   const photoRequired = info.find((c) => c.name === 'photo')?.notnull;
-  const hasAll = ['location', 'values_source', 'recorded_by'].every((n) => info.some((c) => c.name === n));
+  const hasAll = ['location', 'values_source', 'recorded_by', 'symptoms'].every((n) => info.some((c) => c.name === n));
   if (!photoRequired && hasAll) return;
 
   // SQLite no permite quitar NOT NULL: se reconstruye la tabla conservando los datos.
@@ -205,4 +296,4 @@ function tx(db, fn) {
   }
 }
 
-module.exports = { openDb, tx };
+module.exports = { openDb, tx, randomCode };

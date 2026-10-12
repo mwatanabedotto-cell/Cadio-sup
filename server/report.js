@@ -2,32 +2,36 @@
 
 /**
  * Informe PDF del paciente para la consulta: promedios, gráfico, protocolo AMPA,
- * medicación con adherencia, tomas del período y laboratorios.
+ * medicación con adherencia, otras mediciones, valores de laboratorio y tomas del período.
+ * Se genera en el idioma de quien lo pide (es / pt).
  */
 
 const PDFDocument = require('pdfkit');
 const Clinical = require('../public/clinical');
+const I18n = require('../public/i18n');
 
 const C = { text: '#1d2330', muted: '#667085', line: '#d0d5dd', red: '#c0392b', blue: '#2f6fdb', soft: '#f2f4f7' };
-
-function fmtDate(iso, tz, withTime = true) {
-  return new Date(iso).toLocaleString('es', {
-    timeZone: Clinical.validTz(tz) ? tz : 'UTC', day: '2-digit', month: '2-digit', year: 'numeric',
-    ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}),
-  });
-}
 
 const avg = (list, k) => (list.length ? Math.round(list.reduce((a, r) => a + r[k], 0) / list.length) : null);
 const pair = (list) => (list.length ? `${avg(list, 'systolic')}/${avg(list, 'diastolic')}` : '-');
 
 /**
- * data: { patient, doctor, readings (todas), labs, protocol, meds, medLogs, days, now }
- * Devuelve un Buffer con el PDF.
+ * data: { lang, homeHigh, patient, doctor, readings, labs, labResults, measurements, protocol, meds, medLogs, days, now }
+ * Devuelve una promesa con el Buffer del PDF.
  */
 function buildReport(data) {
   const { patient, doctor, labs, protocol, meds, medLogs, days } = data;
+  const lang = I18n.normalizeLang(data.lang);
+  const t = (s, v) => I18n.translate(lang, s, v);
+  const homeHigh = data.homeHigh || Clinical.HOME_HIGH;
   const now = data.now || new Date();
   const tz = patient.timezone || 'UTC';
+  const fmtDate = (iso, withTime = true) => new Date(iso).toLocaleString(I18n.locale(lang), {
+    timeZone: Clinical.validTz(tz) ? tz : 'UTC', day: '2-digit', month: '2-digit', year: 'numeric',
+    ...(withTime ? { hour: '2-digit', minute: '2-digit' } : {}),
+  });
+  const ymd = (s) => s.split('-').reverse().join('/');
+
   const target = Clinical.targetOf(patient);
   const since = new Date(now.getTime() - days * 864e5).toISOString();
   const valid = data.readings.filter((r) => r.systolic && r.diastolic);
@@ -35,42 +39,43 @@ function buildReport(data) {
   const home = period.filter((r) => r.location !== 'consultorio');
   const office = period.filter((r) => r.location === 'consultorio');
   const week = home.filter((r) => r.taken_at >= new Date(now.getTime() - 7 * 864e5).toISOString());
+  const ampa = lang === 'pt' ? 'MRPA' : 'AMPA';
 
-  const doc = new PDFDocument({ size: 'A4', margin: 46, bufferPages: true, info: { Title: `Informe de presión arterial - ${patient.name}` } });
+  const doc = new PDFDocument({ size: 'A4', margin: 46, bufferPages: true, info: { Title: `${t('Informe de presión arterial')} - ${patient.name}` } });
   const chunks = [];
   doc.on('data', (c) => chunks.push(c));
   const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
 
   const W = doc.page.width - 92;
   const left = 46;
-  const ensure = (h) => { if (doc.y + h > doc.page.height - 60) doc.addPage(); };
-  const h2 = (t) => {
+  const ensure = (hgt) => { if (doc.y + hgt > doc.page.height - 60) doc.addPage(); };
+  const h2 = (title) => {
     ensure(60);
-    doc.moveDown(0.8).font('Helvetica-Bold').fontSize(12).fillColor(C.text).text(t, left);
+    doc.moveDown(0.8).font('Helvetica-Bold').fontSize(12).fillColor(C.text).text(title, left);
     doc.moveTo(left, doc.y + 2).lineTo(left + W, doc.y + 2).strokeColor(C.line).lineWidth(0.7).stroke();
     doc.moveDown(0.5).font('Helvetica').fontSize(9.5);
   };
 
   // ---------- encabezado ----------
-  doc.font('Helvetica-Bold').fontSize(17).fillColor(C.red).text('Informe de presión arterial', left);
+  doc.font('Helvetica-Bold').fontSize(17).fillColor(C.red).text(t('Informe de presión arterial'), left);
   doc.font('Helvetica').fontSize(9.5).fillColor(C.muted)
-    .text(`Generado el ${fmtDate(now.toISOString(), tz)} · últimos ${days} días`);
+    .text(t('Generado el {date} · últimos {days} días', { date: fmtDate(now.toISOString()), days }));
   doc.moveDown(0.6).fillColor(C.text).fontSize(10.5);
   const age = patient.birth_date ? Math.floor((now - new Date(patient.birth_date)) / (365.25 * 864e5)) : null;
-  const extra = [age ? `${age} años` : null, patient.phone].filter(Boolean).join('  ·  ');
+  const extra = [age ? t('{n} años', { n: age }) : null, patient.phone].filter(Boolean).join('  ·  ');
   if (extra) doc.font('Helvetica-Bold').text(patient.name, { continued: true }).font('Helvetica').text(`  ·  ${extra}`);
   else doc.font('Helvetica-Bold').text(patient.name).font('Helvetica');
-  doc.fillColor(C.muted).fontSize(9.5).text(`Médico: ${doctor.name}${target ? `   ·   Meta de presión: menor de ${target.sys}/${target.dia} mmHg` : ''}`);
+  doc.fillColor(C.muted).fontSize(9.5).text(`${t('Médico')}: ${doctor.name}${target ? `   ·   ${t('Meta de presión: menor de {sys}/{dia} mmHg', target)}` : ''}`);
 
   // ---------- resumen ----------
-  h2('Resumen');
+  h2(t('Resumen'));
   const inTarget = home.filter((r) => Clinical.classifyBP(r.systolic, r.diastolic, target).inTarget).length;
   const urgent = period.filter((r) => Clinical.classifyBP(r.systolic, r.diastolic, target).urgent);
   const tiles = [
-    ['Promedio en casa 7 días', pair(week), `${week.length} tomas`],
-    [`Promedio en casa ${days} días`, pair(home), `${home.length} tomas`],
-    ['Promedio en consultorio', pair(office), `${office.length} tomas`],
-    [target ? 'Tomas en meta (casa)' : 'Tomas normales (casa)', home.length ? `${Math.round((inTarget / home.length) * 100)}%` : '-', `${inTarget} de ${home.length}`],
+    [t('Promedio en casa 7 días'), pair(week), t('{n} tomas', { n: week.length })],
+    [t('Promedio en casa {days} días', { days }), pair(home), t('{n} tomas', { n: home.length })],
+    [t('Promedio en consultorio'), pair(office), t('{n} tomas', { n: office.length })],
+    [target ? t('Tomas en meta (casa)') : t('Tomas normales (casa)'), home.length ? `${Math.round((inTarget / home.length) * 100)}%` : '-', t('{a} de {b}', { a: inTarget, b: home.length })],
   ];
   const tw = (W - 18) / 4;
   const ty = doc.y;
@@ -83,15 +88,17 @@ function buildReport(data) {
   });
   doc.y = ty + 62;
   doc.x = left;
+  const withSymptoms = period.filter((r) => r.symptoms && r.symptoms !== '[]');
   doc.fontSize(9.5).fillColor(urgent.length ? C.red : C.muted)
     .text(urgent.length
-      ? `${urgent.length} toma(s) en rango de alerta (mayor de 180/120 o menor de 90/60) en el período.`
-      : 'Sin tomas en rango de alerta en el período.', left);
+      ? t('{n} toma(s) en rango de alerta (mayor de 180/120 o menor de 90/60) en el período.', { n: urgent.length })
+      : t('Sin tomas en rango de alerta en el período.'), left);
+  if (withSymptoms.length) doc.fillColor(C.red).text(t('{n} toma(s) enviadas con síntomas.', { n: withSymptoms.length }), left);
 
   // ---------- gráfico ----------
   const pts = period.slice().sort((a, b) => (a.taken_at < b.taken_at ? -1 : 1));
   if (pts.length >= 2) {
-    h2('Evolución');
+    h2(t('Evolución'));
     const H = 150, top = doc.y, L = left + 26, R = left + W;
     const vals = pts.flatMap((p) => [p.systolic, p.diastolic]);
     const min = Math.min(50, ...vals) - 5, max = Math.max(160, ...vals) + 5;
@@ -112,45 +119,107 @@ function buildReport(data) {
       }
     }
     doc.fillColor(C.muted).fontSize(7.5)
-      .text(fmtDate(pts[0].taken_at, tz, false), L, top + H + 4)
-      .text(fmtDate(pts[pts.length - 1].taken_at, tz, false), R - 60, top + H + 4, { width: 60, align: 'right' });
+      .text(fmtDate(pts[0].taken_at, false), L, top + H + 4)
+      .text(fmtDate(pts[pts.length - 1].taken_at, false), R - 60, top + H + 4, { width: 60, align: 'right' });
     doc.x = left;
     doc.y = top + H + 16;
-    doc.fontSize(8).fillColor(C.muted).text('Rojo: sistólica · Azul: diastólica · Cuadrado: medida en consultorio · Líneas guía: 140/90 y meta', left);
+    doc.fontSize(8).fillColor(C.muted).text(t('Rojo: sistólica · Azul: diastólica · Cuadrado: medida en consultorio · Líneas guía: 140/90 y meta'), left);
   }
 
   // ---------- AMPA ----------
   if (protocol) {
-    const s = Clinical.protocolSummary(protocol, data.readings, now);
-    h2('Protocolo de automedición (AMPA)');
-    doc.fillColor(C.text).text(`${protocol.days} días desde el ${protocol.start_date.split('-').reverse().join('/')} · 2 tomas en la mañana y 2 en la noche · el día 1 no se cuenta.`);
-    doc.text(`Estado: ${{ scheduled: 'programado', running: `en curso (día ${s.dayIndex})`, finished: 'terminado', cancelled: 'cancelado' }[s.state]}.`);
+    const s = Clinical.protocolSummary(protocol, data.readings, now, homeHigh);
+    h2(t('Protocolo de automedición ({name})', { name: ampa }));
+    doc.fillColor(C.text).text(t('{days} días desde el {date} · 2 tomas en la mañana y 2 en la noche · el día 1 no se cuenta.', { days: protocol.days, date: ymd(protocol.start_date) }));
+    const state = { scheduled: t('programado'), running: t('en curso (día {n})', { n: s.dayIndex }), finished: t('terminado'), cancelled: t('cancelado') }[s.state];
+    doc.text(`${t('Estado')}: ${state}.`);
     if (s.avg) {
       doc.font('Helvetica-Bold').fillColor(s.high ? C.red : C.text)
-        .text(`Promedio: ${s.avg.sys}/${s.avg.dia} mmHg${s.avg.pulse ? ` · pulso ${s.avg.pulse}` : ''} (${s.counted} de ${s.expected} tomas, ${s.completeness}%)`);
+        .text(t('Promedio: {sys}/{dia} mmHg ({n} de {total} tomas, {pct}%)', { sys: s.avg.sys, dia: s.avg.dia, n: s.counted, total: s.expected, pct: s.completeness })
+          + (s.avg.pulse ? ` · ${t('pulso')} ${s.avg.pulse}` : ''));
       doc.font('Helvetica').fillColor(C.muted)
-        .text(s.high ? 'Mayor o igual a 135/85: elevado según umbral domiciliario ESH.' : 'Menor de 135/85: dentro del umbral domiciliario ESH.')
-        .text(s.enough ? '' : 'Menos de 12 tomas válidas: interpretar con cautela.');
-    } else doc.fillColor(C.muted).text('Aún no hay tomas válidas.');
+        .text(s.high ? t('Mayor o igual a {sys}/{dia}: elevado según el umbral domiciliario.', homeHigh) : t('Menor de {sys}/{dia}: dentro del umbral domiciliario.', homeHigh));
+      if (!s.enough) doc.text(t('Menos de 12 tomas válidas: interpretar con cautela.'));
+    } else doc.fillColor(C.muted).text(t('Aún no hay tomas válidas.'));
   }
 
   // ---------- medicación ----------
-  h2('Medicación indicada');
+  h2(t('Medicación indicada'));
   const active = meds.filter((m) => !m.stopped_at);
-  if (!active.length) doc.fillColor(C.muted).text('Sin medicamentos registrados en la app.');
+  if (!active.length) doc.fillColor(C.muted).text(t('Sin medicamentos registrados en la app.'));
   for (const m of active) {
     ensure(30);
-    const a = Clinical.adherence({ ...m, times: JSON.parse(m.times) }, medLogs, tz, now, 14);
+    const times = JSON.parse(m.times);
+    const a = Clinical.adherence({ ...m, times }, medLogs, tz, now, 14);
     doc.font('Helvetica-Bold').fillColor(C.text).text(`${m.name}${m.dose ? ` ${m.dose}` : ''}`, { continued: true })
-      .font('Helvetica').fillColor(C.muted).text(`  ·  ${JSON.parse(m.times).join(', ')}${m.instructions ? `  ·  ${m.instructions}` : ''}`);
+      .font('Helvetica').fillColor(C.muted).text(`  ·  ${times.join(', ')}${m.instructions ? `  ·  ${m.instructions}` : ''}`);
     doc.fillColor(a.pct !== null && a.pct < 80 ? C.red : C.text)
-      .text(a.pct === null ? 'Adherencia 14 días: sin dosis previstas aún.'
-        : `Adherencia 14 días: ${a.pct}% (${a.taken} tomadas, ${a.skipped} no tomadas, ${a.missing} sin registro, de ${a.expected}).`);
+      .text(a.pct === null ? t('Adherencia 14 días: sin dosis previstas aún.')
+        : t('Adherencia 14 días: {pct}% ({taken} tomadas, {skipped} no tomadas, {missing} sin registro, de {expected}).', a));
     doc.moveDown(0.3);
   }
 
+  // ---------- otras mediciones ----------
+  const ms = (data.measurements || []).filter((m) => m.taken_at >= since);
+  if (ms.length) {
+    h2(t('Otras mediciones'));
+    const byType = (type) => ms.filter((m) => m.type === type).sort((a, b) => (a.taken_at < b.taken_at ? 1 : -1));
+    const weights = byType('weight');
+    if (weights.length) {
+      const last = weights[0], first = weights[weights.length - 1];
+      const b = Clinical.bmi(last.value, patient.height_cm);
+      const diff = Math.round((last.value - first.value) * 10) / 10;
+      doc.fillColor(C.text).text(`${t('Peso')}: ${last.value} kg (${fmtDate(last.taken_at, false)})`
+        + (b ? ` · ${t('IMC')} ${b.value} (${t(b.label)})` : '')
+        + (weights.length > 1 ? ` · ${t('cambio en el período')}: ${diff > 0 ? '+' : ''}${diff} kg` : ''));
+    }
+    const gl = byType('glucose');
+    if (gl.length) {
+      const fasting = gl.filter((g) => g.context === 'fasting');
+      const hypos = gl.filter((g) => g.value < 70).length;
+      doc.fillColor(C.text).text(`${t('Glucosa capilar')}: ${t('{n} mediciones', { n: gl.length })}`
+        + (fasting.length ? ` · ${t('promedio en ayunas')} ${avg(fasting, 'value')} mg/dL` : '')
+        + ` · ${t('máx.')} ${Math.max(...gl.map((g) => g.value))} mg/dL`);
+      if (hypos) doc.fillColor(C.red).text(t('{n} hipoglucemia(s) (menor de 70 mg/dL).', { n: hypos }));
+    }
+    for (const type of ['waist', 'spo2']) {
+      const list = byType(type);
+      if (!list.length) continue;
+      const def = Clinical.MEASURES[type];
+      doc.fillColor(C.text).text(`${t(def.label)}: ${list[0].value} ${def.unit} (${fmtDate(list[0].taken_at, false)})${list.length > 1 ? ` · ${t('mín.')} ${Math.min(...list.map((x) => x.value))} ${def.unit}` : ''}`);
+    }
+  }
+
+  // ---------- valores de laboratorio ----------
+  const results = data.labResults || [];
+  if (results.length) {
+    h2(t('Valores de laboratorio'));
+    const cols = [['Examen', 170], ['Último', 90], ['Fecha', 70], ['Anterior', 90], ['Referencia', W - 420]];
+    const row = (cells, bold = false, color = C.text) => {
+      ensure(16);
+      const yy = doc.y;
+      let xx = left;
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5).fillColor(bold ? C.muted : color);
+      cells.forEach((c, i) => { doc.text(c, xx, yy, { width: cols[i][1] - 4, height: 11, ellipsis: true }); xx += cols[i][1]; });
+      doc.y = yy + 13;
+    };
+    row(cols.map((c) => t(c[0])), true);
+    for (const key of Object.keys(Clinical.ANALYTES)) {
+      const list = results.filter((r) => r.analyte === key).sort((a, b) => (a.taken_date < b.taken_date ? 1 : -1));
+      if (!list.length) continue;
+      const def = Clinical.ANALYTES[key];
+      const [last, prev] = list;
+      const flag = Clinical.labFlag(last);
+      const lo = last.ref_low ?? def.refLow, hi = last.ref_high ?? def.refHigh;
+      const ref = lo !== undefined && lo !== null && hi !== undefined && hi !== null ? `${lo}–${hi}` : hi !== undefined && hi !== null ? `< ${hi}` : lo !== undefined && lo !== null ? `> ${lo}` : '-';
+      row([t(def.label), `${last.value} ${def.unit}${flag === 'ok' ? '' : flag === 'high' ? ' (H)' : ' (L)'}`, ymd(last.taken_date),
+        prev ? `${prev.value} (${ymd(prev.taken_date)})` : '-', ref], false, flag === 'ok' ? C.text : C.red);
+    }
+    doc.x = left;
+  }
+
   // ---------- tabla de tomas ----------
-  h2(`Tomas de los últimos ${days} días`);
+  h2(t('Tomas de los últimos {days} días', { days }));
   const cols = [['Fecha y hora', 110], ['PA (mmHg)', 70], ['Pulso', 45], ['Lugar', 70], ['Clasificación', 90], ['Nota', W - 385]];
   const row = (cells, bold = false) => {
     ensure(16);
@@ -160,24 +229,27 @@ function buildReport(data) {
     cells.forEach((c, i) => { doc.text(c, xx, yy, { width: cols[i][1] - 4, height: 11, ellipsis: true }); xx += cols[i][1]; });
     doc.y = yy + 13;
   };
-  row(cols.map((c) => c[0]), true);
+  row(cols.map((c) => t(c[0])), true);
   const desc = period.slice().sort((a, b) => (a.taken_at < b.taken_at ? 1 : -1));
-  if (!desc.length) doc.fillColor(C.muted).text('Sin tomas en el período.', left);
+  if (!desc.length) doc.fillColor(C.muted).text(t('Sin tomas en el período.'), left);
   for (const r of desc) {
     const c = Clinical.classifyBP(r.systolic, r.diastolic, target);
-    row([fmtDate(r.taken_at, tz), `${r.systolic}/${r.diastolic}`, r.pulse ? String(r.pulse) : '-',
-      r.location === 'consultorio' ? 'Consultorio' : 'Casa', c.label, r.notes || r.doctor_comment || '']);
+    let sx = [];
+    try { sx = JSON.parse(r.symptoms || '[]'); } catch { /* sin síntomas */ }
+    const sxText = sx.map((code) => Clinical.SYMPTOMS.find((x) => x.code === code)).filter(Boolean).map((x) => t(x.label)).join(', ');
+    row([fmtDate(r.taken_at), `${r.systolic}/${r.diastolic}`, r.pulse ? String(r.pulse) : '-',
+      r.location === 'consultorio' ? t('Consultorio') : t('Casa'), t(c.label), [sxText, r.notes || r.doctor_comment].filter(Boolean).join(' · ')]);
   }
   doc.x = left;
 
-  // ---------- laboratorios ----------
-  h2('Laboratorios enviados');
-  if (!labs.length) doc.fillColor(C.muted).text('Sin laboratorios.');
+  // ---------- laboratorios enviados ----------
+  h2(t('Laboratorios enviados'));
+  if (!labs.length) doc.fillColor(C.muted).text(t('Sin laboratorios.'));
   for (const l of labs.slice(0, 15)) {
     ensure(28);
     doc.font('Helvetica-Bold').fillColor(C.text).text(l.title, { continued: true })
-      .font('Helvetica').fillColor(C.muted).text(`  ·  ${l.lab_date ? l.lab_date.split('-').reverse().join('/') : fmtDate(l.created_at.replace(' ', 'T') + 'Z', tz, false)}`);
-    if (l.doctor_comment) doc.fillColor(C.text).text(`Comentario: ${l.doctor_comment}`);
+      .font('Helvetica').fillColor(C.muted).text(`  ·  ${l.lab_date ? ymd(l.lab_date) : fmtDate(`${l.created_at.replace(' ', 'T')}Z`, false)}`);
+    if (l.doctor_comment) doc.fillColor(C.text).text(`${t('Comentario')}: ${l.doctor_comment}`);
     doc.moveDown(0.3);
   }
 
@@ -187,7 +259,7 @@ function buildReport(data) {
     doc.switchToPage(i);
     doc.page.margins.bottom = 0; // el pie va por debajo del margen: evita que se cree otra página
     doc.fontSize(7.5).fillColor(C.muted).text(
-      `Cadio-sup · ${patient.name} · página ${i + 1} de ${range.count} · Valores informados por el paciente o leídos de fotos; verificar ante decisiones clínicas.`,
+      t('Cadio-sup · {name} · página {page} de {pages} · Valores informados por el paciente o leídos de fotos; verificar ante decisiones clínicas.', { name: patient.name, page: i + 1, pages: range.count }),
       left, doc.page.height - 36, { width: W, align: 'center', lineBreak: false });
   }
   doc.end();

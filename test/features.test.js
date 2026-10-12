@@ -215,7 +215,7 @@ test('protocolo AMPA: indicación, recordatorios y resultado al médico', async 
   const done = n.data.items.find((x) => x.kind === 'protocol_done');
   assert.ok(done);
   assert.match(done.body, /138\/86/);
-  assert.match(done.body, /elevado/);
+  assert.match(done.body, /elevado/i);
   // Solo una vez.
   await scheduler.tick(at(Clinical.addDays(start, 7), '09:00'));
   assert.equal((await call('doc', 'GET', '/api/notifications')).data.items.filter((x) => x.kind === 'protocol_done').length, 1);

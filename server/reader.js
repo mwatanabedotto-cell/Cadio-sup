@@ -6,6 +6,7 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const I18n = require('../public/i18n');
 
 // Formatos de imagen que acepta la API. HEIC/HEIF no.
 const SUPPORTED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -42,15 +43,16 @@ Reglas:
 - Si la foto no muestra un tensiómetro, o no puedes leer con seguridad la sistólica y la diastólica, responde readable=false con systolic, diastolic y pulse en null, y explica en note qué falta (por ejemplo "Hay reflejo sobre los números, toma la foto de nuevo sin flash").
 - Nunca inventes un número que no se ve. Si el pulso no aparece, pulse=null.
 - confidence = "baja" si dudaste de algún dígito.
-- note: una frase breve y amable en español. No des consejos médicos ni interpretes si la presión es alta o baja; eso lo hace el médico.`;
+- note: una frase breve y amable, en el idioma que se indique en el mensaje. No des consejos médicos ni interpretes si la presión es alta o baja; eso lo hace el médico.`;
 
 function createReader({ apiKey, model, client } = {}) {
   const anthropic = client || new Anthropic(apiKey ? { apiKey } : {});
   const modelId = model || 'claude-opus-5-5';
 
-  return async function readBloodPressure(buffer, mimeType) {
+  return async function readBloodPressure(buffer, mimeType, lang = 'es') {
+    const tr = (msg) => I18n.translate(lang, msg);
     if (!SUPPORTED.has(mimeType)) {
-      return unreadable('Este formato de imagen no se puede leer automáticamente. Escribe los valores a mano.');
+      return unreadable(tr('Este formato de imagen no se puede leer automáticamente. Escribe los valores a mano.'));
     }
 
     const response = await anthropic.beta.messages.create({
@@ -70,18 +72,18 @@ function createReader({ apiKey, model, client } = {}) {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mimeType, data: buffer.toString('base64') } },
-            { type: 'text', text: 'Lee los valores de esta toma de presión.' },
+            { type: 'text', text: `Lee los valores de esta toma de presión. Escribe "note" en ${lang === 'pt' ? 'portugués de Brasil' : 'español'}.` },
           ],
         },
       ],
     });
 
     if (response.stop_reason === 'refusal' || response.stop_reason === 'max_tokens') {
-      return unreadable('No se pudo leer la foto automáticamente. Escribe los valores a mano.');
+      return unreadable(tr('No se pudo leer la foto automáticamente. Escribe los valores a mano.'));
     }
     const text = response.content.find((b) => b.type === 'text')?.text;
-    if (!text) return unreadable('No se pudo leer la foto automáticamente. Escribe los valores a mano.');
-    return sanitize(JSON.parse(text));
+    if (!text) return unreadable(tr('No se pudo leer la foto automáticamente. Escribe los valores a mano.'));
+    return sanitize(JSON.parse(text), lang);
   };
 }
 
@@ -92,14 +94,14 @@ function unreadable(note) {
 const inRange = (n, min, max) => (Number.isInteger(n) && n >= min && n <= max ? n : null);
 
 /** Valida la salida del modelo contra rangos fisiológicos antes de mostrarla. */
-function sanitize(r) {
+function sanitize(r, lang = 'es') {
   const systolic = inRange(r.systolic, 50, 300);
   const diastolic = inRange(r.diastolic, 30, 200);
   const pulse = inRange(r.pulse, 20, 250);
   if (!r.readable || !systolic || !diastolic || diastolic >= systolic) {
     return unreadable(typeof r.note === 'string' && r.note
       ? r.note.slice(0, 300)
-      : 'No se pudieron leer los números con seguridad. Escríbelos a mano.');
+      : I18n.translate(lang, 'No se pudieron leer los números con seguridad. Escríbelos a mano.'));
   }
   return {
     readable: true,
